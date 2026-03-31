@@ -56,6 +56,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var fixed_strings = false;
     var grep_reflog = false;
     var invert_grep = false;
+    var ignore_case = false;
     var output_encoding: ?[]const u8 = null;
 
     // helpers.Parse arguments
@@ -120,6 +121,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             all_match = true;
         } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
             fixed_strings = true;
+        } else if (std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--extended-regexp")) {
+            fixed_strings = false; // use regex mode
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--regexp-ignore-case")) {
+            ignore_case = true;
         } else if (std.mem.eql(u8, arg, "--grep-reflog")) {
             grep_reflog = true;
         } else if (std.mem.eql(u8, arg, "--invert-grep")) {
@@ -673,7 +678,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 if (has_author_filter) {
                     var any_author = false;
                     for (author_filters.items) |af| {
-                        if (matchesFilter(author_line orelse "", af, fixed_strings)) {
+                        if (matchesFilter(author_line orelse "", af, fixed_strings, ignore_case)) {
                             any_author = true;
                             break;
                         }
@@ -683,7 +688,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 if (has_committer_filter) {
                     var any_committer = false;
                     for (committer_filters.items) |cf| {
-                        if (matchesFilter(committer_line, cf, fixed_strings)) {
+                        if (matchesFilter(committer_line, cf, fixed_strings, ignore_case)) {
                             any_committer = true;
                             break;
                         }
@@ -692,7 +697,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 }
                 if (has_grep_filter) {
                     for (grep_filters.items) |gf| {
-                        if (!matchesFilter(msg_text, gf, fixed_strings)) break :filterCommit false;
+                        if (!matchesFilter(msg_text, gf, fixed_strings, ignore_case)) break :filterCommit false;
                     }
                 }
                 break :filterCommit true;
@@ -705,7 +710,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
                 if (has_grep_filter) {
                     for (grep_filters.items) |gf| {
-                        if (matchesFilter(msg_text, gf, fixed_strings)) {
+                        if (matchesFilter(msg_text, gf, fixed_strings, ignore_case)) {
                             grep_match = true;
                             break;
                         }
@@ -713,7 +718,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 }
                 if (has_author_filter) {
                     for (author_filters.items) |af| {
-                        if (matchesFilter(author_line orelse "", af, fixed_strings)) {
+                        if (matchesFilter(author_line orelse "", af, fixed_strings, ignore_case)) {
                             author_match = true;
                             break;
                         }
@@ -721,7 +726,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 }
                 if (has_committer_filter) {
                     for (committer_filters.items) |cf| {
-                        if (matchesFilter(committer_line, cf, fixed_strings)) {
+                        if (matchesFilter(committer_line, cf, fixed_strings, ignore_case)) {
                             committer_match = true;
                             break;
                         }
@@ -928,9 +933,45 @@ fn displayNote(git_path: []const u8, commit_hash: []const u8, allocator: std.mem
 }
 
 /// Check if text matches a filter pattern (substring or fixed-string match)
-fn matchesFilter(text: []const u8, pattern: []const u8, fixed: bool) bool {
+fn toLowerByte(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
+fn matchesFilterCaseInsensitive(text: []const u8, pattern: []const u8, fixed: bool) bool {
+    if (fixed) {
+        // Case-insensitive substring search
+        if (pattern.len > text.len) return false;
+        var i: usize = 0;
+        while (i + pattern.len <= text.len) : (i += 1) {
+            var match = true;
+            for (0..pattern.len) |j| {
+                if (toLowerByte(text[i + j]) != toLowerByte(pattern[j])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+    // Case-insensitive regex: convert text to lowercase and pattern to lowercase, then match
+    // This is a simplification - proper case folding would be needed for unicode
+    var lower_text_buf: [4096]u8 = undefined;
+    const tlen = @min(text.len, lower_text_buf.len);
+    for (0..tlen) |i| lower_text_buf[i] = toLowerByte(text[i]);
+    var lower_pat_buf: [1024]u8 = undefined;
+    const plen = @min(pattern.len, lower_pat_buf.len);
+    for (0..plen) |i| lower_pat_buf[i] = toLowerByte(pattern[i]);
+    return matchesFilter(lower_text_buf[0..tlen], lower_pat_buf[0..plen], false, false);
+}
+
+fn matchesFilter(text: []const u8, pattern: []const u8, fixed: bool, case_insensitive: bool) bool {
     if (pattern.len == 0) return true;
     if (text.len == 0) return false;
+    if (case_insensitive) {
+        // Case-insensitive matching: convert both to lowercase and match
+        return matchesFilterCaseInsensitive(text, pattern, fixed);
+    }
     if (fixed) {
         return std.mem.indexOf(u8, text, pattern) != null;
     }
