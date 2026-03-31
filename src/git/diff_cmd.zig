@@ -4764,6 +4764,11 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         for (start_hashes.items) |h| allocator.free(h);
         start_hashes.deinit();
     }
+    var start_ref_names = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (start_ref_names.items) |n| allocator.free(n);
+        start_ref_names.deinit();
+    }
 
     // Separate include and exclude refs
     var exclude_hashes = std.array_list.Managed([]const u8).init(allocator);
@@ -4791,6 +4796,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                         std.process.exit(128);
                     };
                     try start_hashes.append(h);
+                    try start_ref_names.append(try allocator.dupe(u8, c[dot_pos + 2..]));
                 }
             } else {
                 const h = git_helpers_mod.resolveRevision(git_path, c, pi, allocator) catch {
@@ -4800,6 +4806,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                     std.process.exit(128);
                 };
                 try start_hashes.append(h);
+                try start_ref_names.append(try allocator.dupe(u8, c));
             }
         }
     }
@@ -4810,6 +4817,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             std.process.exit(128);
         }
         try start_hashes.append(head.?);
+        try start_ref_names.append(try allocator.dupe(u8, "HEAD"));
     }
 
     // If --all, add all refs
@@ -4820,6 +4828,10 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
             const dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ git_path, d });
             defer allocator.free(dir_path);
             addRefsFromDir(allocator, dir_path, &start_hashes, git_path) catch {};
+            // Ensure ref names list stays in sync
+            while (start_ref_names.items.len < start_hashes.items.len) {
+                try start_ref_names.append(try allocator.dupe(u8, start_hashes.items[start_ref_names.items.len]));
+            }
         }
     }
 
@@ -4901,6 +4913,21 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 const ref_for_selector = if (committish_list.items.len > 0) ref_name else "HEAD";
                 const selector = try std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_for_selector, reflog_entries.items.len - 1 - entry_idx });
                 defer allocator.free(selector);
+
+                // Apply --grep filtering for reflog entries
+                if (lo.grep_filters.items.len > 0) {
+                    // For reflog, match against the commit message
+                    const r_obj = objects.GitObject.load(entry.new_hash, git_path, pi, allocator) catch null;
+                    defer if (r_obj) |o| o.deinit(allocator);
+                    const r_msg = if (r_obj) |o| extractMessage(o.data) else "";
+                    var grep_ok = false;
+                    for (lo.grep_filters.items) |gf| {
+                        if (logFilterMatch(r_msg, gf, lo.fixed_strings)) { grep_ok = true; break; }
+                    }
+                    const skip = if (lo.invert_grep) grep_ok else !grep_ok;
+                    if (skip) continue;
+                }
+
                 if (lo.format_string) |fmt| {
                     if (lo.format_is_separator and count > 0) {
                         try pi.writeStdout("\n");
@@ -5077,17 +5104,22 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 continue;
             }
             if (obj.type == .tree) {
-                const hdr = try std.fmt.allocPrint(allocator, "tree {s}\n\n", .{hash});
+                const display_name = if (idx < start_ref_names.items.len) start_ref_names.items[idx] else hash;
+                const hdr = try std.fmt.allocPrint(allocator, "tree {s}\n\n", .{display_name});
                 defer allocator.free(hdr);
                 try pi.writeStdout(hdr);
                 // List tree entries
                 var tpos: usize = 0;
                 while (tpos < obj.data.len) {
+                    const mode_start = tpos;
                     const sp = std.mem.indexOfScalarPos(u8, obj.data, tpos, ' ') orelse break;
+                    const mode = obj.data[mode_start..sp];
                     tpos = sp + 1;
                     const np = std.mem.indexOfScalarPos(u8, obj.data, tpos, 0) orelse break;
                     const ename = obj.data[tpos..np];
                     try pi.writeStdout(ename);
+                    // Append / for directory entries (mode 40000)
+                    if (std.mem.eql(u8, mode, "40000")) try pi.writeStdout("/");
                     try pi.writeStdout("\n");
                     tpos = np + 1 + 20;
                 }

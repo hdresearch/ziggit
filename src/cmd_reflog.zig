@@ -28,6 +28,9 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
     var end_of_options = false;
     var format: ?[]const u8 = null;
     var max_count: ?usize = null;
+    var grep_pattern: ?[]const u8 = null;
+    var fixed_strings = false;
+    var fixed_strings_explicit = false;
 
     var i = command_index + 1;
     while (i < args.len) : (i += 1) {
@@ -48,6 +51,14 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
             std.process.exit(129);
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             format = arg["--format=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--grep=")) {
+            grep_pattern = arg["--grep=".len..];
+        } else if (std.mem.eql(u8, arg, "-F") or std.mem.eql(u8, arg, "--fixed-strings")) {
+            fixed_strings = true;
+            fixed_strings_explicit = true;
+        } else if (std.mem.eql(u8, arg, "-G") or std.mem.eql(u8, arg, "--basic-regexp") or std.mem.eql(u8, arg, "-E") or std.mem.eql(u8, arg, "--extended-regexp") or std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--perl-regexp")) {
+            fixed_strings = false;
+            fixed_strings_explicit = true;
         } else if (std.mem.eql(u8, arg, "-n")) {
             if (i + 1 < args.len) {
                 i += 1;
@@ -87,6 +98,16 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
         std.process.exit(128);
         unreachable;
     };
+
+    // Read grep.patternType from config
+    if (!fixed_strings_explicit) {
+        if (helpers.getConfigValueByKey(git_dir, "grep.patterntype", allocator)) |pt_val| {
+            if (std.ascii.eqlIgnoreCase(pt_val, "fixed")) {
+                fixed_strings = true;
+            }
+            allocator.free(pt_val);
+        }
+    }
 
     if (std.mem.eql(u8, subcmd, "show")) {
         // helpers.Read reflog file
@@ -141,6 +162,26 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
                     const new_sha = line[41..81];
                     const old_sha = line[0..40];
                     _ = old_sha;
+
+                    // Apply --grep filtering
+                    if (grep_pattern) |gp| {
+                        // Load commit to get message for filtering
+                        const grep_obj = objects.GitObject.load(new_sha, git_dir, platform_impl, allocator) catch null;
+                        defer if (grep_obj) |o| o.deinit(allocator);
+                        const grep_msg = if (grep_obj) |o| blk: {
+                            if (std.mem.indexOf(u8, o.data, "\n\n")) |pos| break :blk o.data[pos + 2 ..];
+                            break :blk "";
+                        } else "";
+                        const matched = if (fixed_strings)
+                            std.mem.indexOf(u8, grep_msg, gp) != null
+                        else
+                            simpleGrepMatch(grep_msg, gp);
+                        if (!matched) {
+                            seq += 1;
+                            continue;
+                        }
+                    }
+
                     if (format) |fmt| {
                         // Simple format string handling
                         var output_buf = std.array_list.Managed(u8).init(allocator);
@@ -203,6 +244,29 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
     }
 }
 
+
+/// Simple grep match: supports '.' as wildcard (single char) in non-fixed mode
+fn simpleGrepMatch(text: []const u8, pattern: []const u8) bool {
+    if (pattern.len == 0) return true;
+    // Check each line
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len >= pattern.len) {
+            var si: usize = 0;
+            while (si + pattern.len <= line.len) : (si += 1) {
+                var match = true;
+                for (0..pattern.len) |pi| {
+                    if (pattern[pi] != '.' and pattern[pi] != line[si + pi]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return true;
+            }
+        }
+    }
+    return false;
+}
 
 pub fn shouldLogRef(git_dir: []const u8, ref_name: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator) bool {
     // helpers.Check core.logAllRefUpdates config
