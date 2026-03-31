@@ -4,13 +4,14 @@ const helpers = @import("git_helpers.zig");
 const objects = helpers.objects;
 const refs = helpers.refs;
 const commit_graph_mod = @import("git/commit_graph.zig");
+const builtin = @import("builtin");
 
 pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    const allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
+    const allocator = if (comptime builtin.target.os.tag != .freestanding and builtin.target.os.tag != .wasi)
         std.heap.c_allocator
     else
         passed_allocator;
-    if (@import("builtin").target.os.tag == .freestanding) {
+    if (builtin.target.os.tag == .freestanding) {
         try platform_impl.writeStderr("shortlog: not supported in freestanding mode\n");
         return;
     }
@@ -113,7 +114,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             }
         }
 
-        // Use a bitset for visited instead of hash map (positions are dense 0..num_commits)
+        // Phase 1: Walk commit-graph collecting all reachable commit positions
         const num_commits = cg.num_commits;
         const bitset_words = (num_commits + 63) / 64;
         const visited_bits = allocator.alloc(u64, bitset_words) catch null;
@@ -121,6 +122,11 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
         if (visited_bits) |bits| {
             @memset(bits, 0);
+
+            // Collect all positions
+            var positions = std.array_list.Managed(u32).init(allocator);
+            defer positions.deinit();
+            positions.ensureTotalCapacity(num_commits) catch {};
 
             var stack = std.array_list.Managed(u32).init(allocator);
             defer stack.deinit();
@@ -133,51 +139,13 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                     const cur = stack.items[stack.items.len - 1];
                     stack.items.len -= 1;
 
-                    // Bitset check
                     const word_idx = cur / 64;
                     const bit_mask = @as(u64, 1) << @truncate(cur % 64);
                     if (bits[word_idx] & bit_mask != 0) continue;
                     bits[word_idx] |= bit_mask;
 
-                    // Get author from pack data using fast direct reader
-                    const oid_bytes = cg.getOidBytes(cur);
+                    positions.append(cur) catch {};
 
-                    const author_data: ?[]const u8 = blk: {
-                        for (0..num_packs) |pi| {
-                            if (objects.readPackCommitHeaderDirect(pack_data_arr[pi], idx_data_arr[pi], oid_bytes.*)) |data| {
-                                break :blk data;
-                            }
-                        }
-                        break :blk null;
-                    };
-
-                    if (author_data) |data| {
-                        const author = extractAuthor(data, email);
-                        if (author.len > 0) {
-                            if (author_map.getPtr(author)) |cnt| {
-                                cnt.* += 1;
-                            } else {
-                                author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
-                            }
-                        }
-                    } else {
-                        // Final fallback: full object load
-                        var hash_hex: [40]u8 = undefined;
-                        cg.getOidHex(cur, &hash_hex);
-                        if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
-                            defer obj.deinit(allocator);
-                            const author = extractAuthor(obj.data, email);
-                            if (author.len > 0) {
-                                if (author_map.getPtr(author)) |cnt| {
-                                    cnt.* += 1;
-                                } else {
-                                    author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
-                                }
-                            }
-                        } else |_| {}
-                    }
-
-                    // Add parents from commit-graph (no parsing needed)
                     const cd = cg.getCommitData(cur);
                     if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
                         stack.append(cd.parent1) catch {};
@@ -187,6 +155,45 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                     }
                 }
             }
+
+            // Phase 2: Resolve pack offsets for all positions
+            const PackOffset = struct { pack_idx: u8, offset: u32 };
+            const pack_offsets = allocator.alloc(PackOffset, positions.items.len) catch null;
+            defer if (pack_offsets) |po| allocator.free(po);
+
+            if (pack_offsets) |offsets| {
+                for (positions.items, 0..) |pos, i| {
+                    const oid_bytes = cg.getOidBytes(pos);
+                    offsets[i] = .{ .pack_idx = 0, .offset = 0 };
+                    for (0..num_packs) |pi| {
+                        if (objects.findOffsetInIdx(idx_data_arr[pi], oid_bytes.*)) |off| {
+                            offsets[i] = .{ .pack_idx = @intCast(pi), .offset = @intCast(off) };
+                            break;
+                        }
+                    }
+                }
+
+                // Phase 3: Decompress and extract authors
+                for (offsets) |po| {
+                    if (po.offset == 0) continue;
+                    const pi = po.pack_idx;
+                    const data = objects.readPackCommitHeaderDirect(
+                        pack_data_arr[pi],
+                        idx_data_arr[pi],
+                        po.offset,
+                    ) orelse continue;
+
+                    const author = extractAuthor(data, email);
+                    if (author.len > 0) {
+                        if (author_map.getPtr(author)) |cnt| {
+                            cnt.* += 1;
+                        } else {
+                            author_map.put(allocator.dupe(u8, author) catch continue, 1) catch {};
+                        }
+                    }
+                }
+            }
+
         }
     } else {
         // Fallback: regular object loading (no commit-graph)
@@ -256,7 +263,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         }.cmp);
     }
 
-    // Output using buffered writer
+    // Output
     var out_buf = std.array_list.Managed(u8).init(allocator);
     defer out_buf.deinit();
     try out_buf.ensureTotalCapacity(results.items.len * 40);
@@ -283,14 +290,10 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 }
 
 fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
-    // Fast scan: find "author " after "tree " and "parent " lines
-    // Commit format: tree <hash>\nparent <hash>\nauthor <name> <email> <timestamp>\n...
     var pos: usize = 0;
     while (pos + 7 < data.len) {
-        // Find next newline
-        if (data[pos] == 'a' and pos + 7 <= data.len and std.mem.eql(u8, data[pos..pos + 7], "author ")) {
+        if (data[pos] == 'a' and pos + 7 <= data.len and std.mem.eql(u8, data[pos .. pos + 7], "author ")) {
             const author_start = pos + 7;
-            // Find end of line
             var end = author_start;
             while (end < data.len and data[end] != '\n') : (end += 1) {}
             const author_line = data[author_start..end];
@@ -308,10 +311,8 @@ fn extractAuthor(data: []const u8, include_email: bool) []const u8 {
             }
             return author_line;
         }
-        // Skip to next line
         while (pos < data.len and data[pos] != '\n') : (pos += 1) {}
-        pos += 1; // skip \n
-        // Stop at blank line (end of headers)
+        pos += 1;
         if (pos < data.len and data[pos] == '\n') break;
     }
     return "";

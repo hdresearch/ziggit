@@ -960,13 +960,21 @@ pub fn readPackObjectDirect(pack_data: []const u8, idx_data: []const u8, oid_byt
 /// Fast partial read: decompress only enough to get commit headers (author line).
 /// For non-delta objects, uses partial decompression (very fast).
 /// For delta objects, falls through to full resolution.
-var partial_out_buf: [512]u8 = undefined;
-pub fn readPackCommitHeaderDirect(pack_data: []const u8, idx_data: []const u8, oid_bytes: [20]u8) ?[]const u8 {
-    const offset = findOffsetInIdx(idx_data, oid_bytes) orelse return null;
+/// Can be called with OID bytes (looks up in idx) or with a pre-resolved offset.
+var partial_out_buf: [1024]u8 = undefined;
+pub fn readPackCommitHeaderDirect(pack_data: []const u8, idx_data: []const u8, offset: usize) ?[]const u8 {
     const hdr = parsePackHeader(pack_data, offset) orelse return null;
 
-    // Non-delta: partial decompress just the first 512 bytes
+    // Non-delta: decompress into static buffer
     if (hdr.obj_type == 1) { // commit
+        if (hdr.size <= partial_out_buf.len) {
+            initCZlib();
+            const uncompress_fn = zlib_uncompress_fn orelse return null;
+            var dest_len: c_ulong = partial_out_buf.len;
+            const remaining = pack_data[hdr.data_pos..];
+            const ret = uncompress_fn(&partial_out_buf, &dest_len, remaining.ptr, @intCast(@min(remaining.len, 4096)));
+            if (ret == 0) return partial_out_buf[0..@intCast(dest_len)];
+        }
         if (decompressPartial(pack_data[hdr.data_pos..], &partial_out_buf)) |data| {
             return data;
         }
@@ -975,6 +983,12 @@ pub fn readPackCommitHeaderDirect(pack_data: []const u8, idx_data: []const u8, o
     // Delta or decompression issue: fall through to full resolution
     const result = readPackObjectAtOffsetFast(pack_data, idx_data, offset) orelse return null;
     return result.data;
+}
+
+/// Variant that takes an OID and looks up the offset first.
+pub fn readPackCommitHeaderByOid(pack_data: []const u8, idx_data: []const u8, oid_bytes: [20]u8) ?[]const u8 {
+    const offset = findOffsetInIdx(idx_data, oid_bytes) orelse return null;
+    return readPackCommitHeaderDirect(pack_data, idx_data, offset);
 }
 
 fn readPackObjectAtOffsetFast(pack_data: []const u8, idx_data: []const u8, offset: usize) ?PackResult {
