@@ -55,20 +55,16 @@ pub fn getFilterName(
 }
 
 /// Get a filter command from git config.
-/// key is like "filter.upper.clean" or "filter.upper.smudge"
 fn getFilterCommand(
     allocator: std.mem.Allocator,
     git_path: []const u8,
     filter_name: []const u8,
     operation: []const u8,
-) ?[]u8 {
+) ?[]const u8 {
     const key = std.fmt.allocPrint(allocator, "filter.{s}.{s}", .{ filter_name, operation }) catch return null;
     defer allocator.free(key);
 
-    if (helpers.getConfigValueByKey(git_path, key, allocator)) |val| {
-        return val;
-    }
-    return null;
+    return helpers.getConfigValueByKey(git_path, key, allocator);
 }
 
 /// Get the clean filter command for a given filter name.
@@ -76,7 +72,7 @@ pub fn getCleanCommand(
     allocator: std.mem.Allocator,
     git_path: []const u8,
     filter_name: []const u8,
-) ?[]u8 {
+) ?[]const u8 {
     return getFilterCommand(allocator, git_path, filter_name, "clean");
 }
 
@@ -85,7 +81,7 @@ pub fn getSmudgeCommand(
     allocator: std.mem.Allocator,
     git_path: []const u8,
     filter_name: []const u8,
-) ?[]u8 {
+) ?[]const u8 {
     return getFilterCommand(allocator, git_path, filter_name, "smudge");
 }
 
@@ -94,7 +90,7 @@ pub fn getProcessCommand(
     allocator: std.mem.Allocator,
     git_path: []const u8,
     filter_name: []const u8,
-) ?[]u8 {
+) ?[]const u8 {
     return getFilterCommand(allocator, git_path, filter_name, "process");
 }
 
@@ -127,7 +123,7 @@ pub fn runFilter(
     }
 
     // Read all stdout
-    var stdout_list = std.ArrayList(u8).init(allocator);
+    var stdout_list = std.array_list.Managed(u8).init(allocator);
     defer stdout_list.deinit();
 
     if (child.stdout) |*stdout_pipe| {
