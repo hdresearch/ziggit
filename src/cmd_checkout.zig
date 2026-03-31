@@ -556,6 +556,21 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             }
         }
 
+        // Resolve @{-N} to actual branch name before further processing
+        var resolved_at_minus: ?[]u8 = null;
+        defer if (resolved_at_minus) |ram| allocator.free(ram);
+        if (std.mem.startsWith(u8, target, "@{-")) {
+            if (std.mem.indexOf(u8, target, "}")) |close| {
+                const n_str = target[3..close];
+                if (std.fmt.parseInt(u32, n_str, 10)) |n| {
+                    resolved_at_minus = helpers.resolvePreviousBranch(git_path, n, allocator, platform_impl) catch null;
+                    if (resolved_at_minus) |ram| {
+                        target = ram;
+                    }
+                } else |_| {}
+            }
+        }
+
         // helpers.Handle --detach: resolve target to commit hash and write directly to helpers.HEAD
         if (detach) {
             // helpers.Resolve the target to a commit hash

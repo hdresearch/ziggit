@@ -43,6 +43,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     var show_stash = false;
     var show_stash_explicit = false;
     var show_ignored = false;
+    var verbose_count: u8 = 0;
     var ignore_submodules: enum { none, untracked, dirty, all } = .none;
     var show_untracked = true; // default: show untracked files
     var untracked_explicit = false;
@@ -111,7 +112,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         } else if (std.mem.eql(u8, arg, "--column") or std.mem.startsWith(u8, arg, "--column=")) {
             // Column display - accept as no-op
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
-            // Verbose mode - accept as no-op (shows diff in commit template)
+            verbose_count += 1;
         } else if (std.mem.eql(u8, arg, "--ignored")) {
             show_ignored = true;
         } else if (std.mem.eql(u8, arg, "--show-stash")) {
@@ -952,6 +953,23 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 }
             }
         } else |_| {}
+    }
+
+    // Verbose mode: show diff of staged changes
+    if (verbose_count > 0 and !porcelain and !short_format) {
+        // Run the diff --cached command internally
+        const diff_cmd = @import("git/diff_cmd.zig");
+        try platform_impl.writeStdout("\n");
+        // Create args for diff --cached
+        var diff_args_list = std.array_list.Managed([]const u8).init(allocator);
+        defer diff_args_list.deinit();
+        try diff_args_list.append("--cached");
+        if (verbose_count >= 2) {
+            // -v -v also shows diff of unstaged changes
+            // For now just show cached diff
+        }
+        var diff_arg_iter = platform_mod.ArgIterator.initFromSlice(diff_args_list.items);
+        diff_cmd.cmdDiff(allocator, &diff_arg_iter, platform_impl) catch {};
     }
 }
 
