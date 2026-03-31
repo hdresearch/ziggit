@@ -166,6 +166,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     var cleanup_explicit = false;
     var author_override: ?[]const u8 = null;
     var msg_source: enum { none, m_flag, f_flag, c_flag } = .none;
+    var template_message: ?[]const u8 = null;
     var commit_files = std.array_list.Managed([]const u8).init(allocator);
     defer commit_files.deinit();
     var seen_dashdash = false;
@@ -333,29 +334,25 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             while (args.next()) |farg| try commit_files.append(farg);
             break;
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--template")) {
-            // Template file — read it as the initial message (like -F but as template)
+            // Template file — read it as the initial content for editor (not same as -F)
             const template_path = args.next() orelse {
                 try platform_impl.writeStderr("error: option '-t' requires a value\n");
                 std.process.exit(129);
             };
-            if (message == null and message_parts.items.len == 0) {
-                message = platform_impl.fs.readFile(allocator, template_path) catch {
-                    const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{template_path});
-                    defer allocator.free(err_msg);
-                    try platform_impl.writeStderr(err_msg);
-                    std.process.exit(128);
-                };
-            }
+            template_message = platform_impl.fs.readFile(allocator, template_path) catch {
+                const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{template_path});
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                std.process.exit(128);
+            };
         } else if (std.mem.startsWith(u8, arg, "--template=")) {
             const template_path = arg["--template=".len..];
-            if (message == null and message_parts.items.len == 0) {
-                message = platform_impl.fs.readFile(allocator, template_path) catch {
-                    const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{template_path});
-                    defer allocator.free(err_msg);
-                    try platform_impl.writeStderr(err_msg);
-                    std.process.exit(128);
-                };
-            }
+            template_message = platform_impl.fs.readFile(allocator, template_path) catch {
+                const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{template_path});
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                std.process.exit(128);
+            };
         } else if (std.mem.eql(u8, arg, "--status")) {
             status_option = .yes;
         } else if (std.mem.eql(u8, arg, "--no-status")) {
@@ -439,7 +436,8 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 
     // Determine if we need to launch an editor
-    const need_editor = (message == null and msg_source == .none) or force_edit;
+    // -t/--template sets initial content for editor but still requires editor
+    const need_editor = (message == null and msg_source == .none) or force_edit or template_message != null;
     if (need_editor and !no_edit) {
         // Write COMMIT_EDITMSG and launch editor
         const editmsg_path = try std.fmt.allocPrint(allocator, "{s}/COMMIT_EDITMSG", .{git_path});
@@ -475,8 +473,9 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         var editmsg_buf = std.array_list.Managed(u8).init(allocator);
         defer editmsg_buf.deinit();
 
-        // Add existing message if any
-        if (message) |msg| {
+        // Add existing message if any (template_message takes precedence for editor initial content)
+        const editor_initial_msg = template_message orelse message;
+        if (editor_initial_msg) |msg| {
             try editmsg_buf.appendSlice(msg);
             if (msg.len > 0 and msg[msg.len - 1] != '\n') try editmsg_buf.append('\n');
         } else {
