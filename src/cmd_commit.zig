@@ -529,8 +529,8 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             try editmsg_buf.appendSlice(" Do not modify or remove the line above.\n");
             try editmsg_buf.append(ed_comment_char);
             try editmsg_buf.appendSlice(" Everything below it will be ignored.\n");
-        } else if (cleanup_mode != .verbatim) {
-            // Add standard comment block
+        } else if (cleanup_mode == .strip or cleanup_mode == .default) {
+            // Add standard comment block (only when comments will be stripped)
             try editmsg_buf.append(ed_comment_char);
             try editmsg_buf.appendSlice(" Please enter the commit message for your changes. Lines starting\n");
             try editmsg_buf.append(ed_comment_char);
@@ -540,7 +540,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         // Add author/date/committer info as comments if needed
-        if (cleanup_mode != .verbatim) {
+        if (cleanup_mode == .strip or cleanup_mode == .default or cleanup_mode == .scissors) {
             // Show author if different from committer
             const ed_author = if (author_override) |ao| ao else std.posix.getenv("GIT_AUTHOR_NAME");
             const ed_committer_name = std.posix.getenv("GIT_COMMITTER_NAME");
@@ -574,7 +574,7 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         }
 
         // Add status info (Changes to be committed, etc.)
-        if (show_status and cleanup_mode != .verbatim) {
+        if (show_status and (cleanup_mode == .strip or cleanup_mode == .default or cleanup_mode == .scissors)) {
             try editmsg_buf.append(ed_comment_char);
             try editmsg_buf.append('\n');
 
@@ -652,6 +652,22 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         defer allocator.free(editmsg_path2);
         if (message) |msg| {
             platform_impl.fs.writeFile(editmsg_path2, msg) catch {};
+        }
+    }
+
+    // Read commit.cleanup config if no explicit --cleanup was given
+    if (!cleanup_explicit) {
+        if (helpers.getConfigValueByKey(git_path, "commit.cleanup", allocator)) |cleanup_cfg| {
+            defer allocator.free(cleanup_cfg);
+            if (std.ascii.eqlIgnoreCase(cleanup_cfg, "verbatim")) {
+                cleanup_mode = .verbatim;
+            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "whitespace")) {
+                cleanup_mode = .whitespace;
+            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "strip")) {
+                cleanup_mode = .strip;
+            } else if (std.ascii.eqlIgnoreCase(cleanup_cfg, "scissors")) {
+                cleanup_mode = .scissors;
+            }
         }
     }
 

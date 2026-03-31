@@ -1720,9 +1720,30 @@ pub fn outputFormattedCommitFromDataWithDecor(format: []const u8, commit_hash: [
             const msg_start = nl + 1;
             if (msg_start < commit_data.len) {
                 raw_message = commit_data[msg_start..];
-                const subj_end = std.mem.indexOfScalarPos(u8, commit_data, msg_start, '\n') orelse commit_data.len;
-                subject = commit_data[msg_start..subj_end];
-                body_start = if (subj_end + 1 < commit_data.len) subj_end + 1 else commit_data.len;
+                // Subject is the first paragraph (up to first blank line), newlines replaced by spaces
+                var subj_para_end: usize = msg_start;
+                while (subj_para_end < commit_data.len) {
+                    const line_end = std.mem.indexOfScalarPos(u8, commit_data, subj_para_end, '\n') orelse commit_data.len;
+                    const cur_line = commit_data[subj_para_end..line_end];
+                    if (cur_line.len == 0) break; // blank line ends the subject paragraph
+                    subj_para_end = if (line_end < commit_data.len) line_end + 1 else line_end;
+                }
+                // Build subject: join lines with spaces
+                const subj_raw = commit_data[msg_start..if (subj_para_end > msg_start and commit_data[subj_para_end - 1] == '\n') subj_para_end - 1 else subj_para_end];
+                if (std.mem.indexOfScalar(u8, subj_raw, '\n')) |_| {
+                    // Multi-line subject: replace newlines with spaces
+                    const subj_copy = allocator.alloc(u8, subj_raw.len) catch subj_raw;
+                    @memcpy(@constCast(subj_copy), subj_raw);
+                    std.mem.replaceScalar(u8, @constCast(subj_copy), '\n', ' ');
+                    subject = subj_copy;
+                } else {
+                    subject = subj_raw;
+                }
+                body_start = if (subj_para_end < commit_data.len) subj_para_end else commit_data.len;
+                // Skip the blank line separator if present
+                if (body_start < commit_data.len and commit_data[body_start] == '\n') {
+                    body_start += 1;
+                }
                 body_end = commit_data.len;
             }
             break;
@@ -1742,7 +1763,6 @@ pub fn outputFormattedCommitFromDataWithDecor(format: []const u8, commit_hash: [
         pos = nl + 1;
     }
     const parent_hashes = parent_hashes_buf[0..parent_count];
-    _ = allocator;
 
     var i: usize = 0;
     while (i < format.len) {
