@@ -985,6 +985,9 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }
     }
+
+    // Run post-commit hook
+    _ = hooks.runHook(allocator, git_path, "post-commit", &.{}, null, platform_impl) catch {};
 }
 
 

@@ -1641,7 +1641,10 @@ pub fn cmdCheckoutIndex(allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 continue;
             };
             defer file.close();
-            file.writeAll(content) catch continue;
+            // Apply smudge filter if configured
+            const smudged_co = filter_driver.applySmudgeFilter(allocator, entry_path, content, git_dir, platform_impl);
+            defer if (smudged_co) |s| allocator.free(s);
+            file.writeAll(smudged_co orelse content) catch continue;
 
             if (is_executable) {
                 const st = file.stat() catch continue;
