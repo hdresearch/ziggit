@@ -6,6 +6,8 @@ const refs = helpers.refs;
 const commit_graph_mod = @import("git/commit_graph.zig");
 const builtin = @import("builtin");
 
+const debug_timing = true;
+
 pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     const allocator = if (comptime builtin.target.os.tag != .freestanding and builtin.target.os.tag != .wasi)
         std.heap.c_allocator
@@ -60,10 +62,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
     }
     defer allocator.free(start_commit);
 
-    const debug_timing = true;
-    var t0: i128 = 0;
-    if (debug_timing) t0 = std.time.nanoTimestamp();
-
     var author_map = std.StringHashMap(AuthorEntry).init(allocator);
     defer {
         var it = author_map.iterator();
@@ -75,14 +73,12 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
         author_map.deinit();
     }
 
-    if (debug_timing) {
-        const dt = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e6;
-        std.debug.print("setup: {d:.1}ms\n", .{dt});
-    }
-
     // Try commit-graph fast path
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-        // Setup direct pack access
+        // Preload all non-delta commit objects into cache (sequential pack read)
+        objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+
+        // Setup direct pack access for delta objects not in cache
         const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
         defer if (pack_dir_path) |p| allocator.free(p);
 
@@ -125,11 +121,6 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             }
         }
 
-        if (debug_timing) {
-            const dt = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e6;
-            std.debug.print("pack setup: {d:.1}ms\n", .{dt});
-        }
-
         // Walk commit-graph: collect all reachable commit positions
         const num_commits = cg.num_commits;
         const bitset_words = (num_commits + 63) / 64;
@@ -141,108 +132,65 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
             author_map.ensureTotalCapacity(@intCast(@min(num_commits, 1024))) catch {};
 
-            // Phase 1: Walk commit-graph to collect all reachable commit positions
-            var commit_positions = std.array_list.Managed(u32).init(allocator);
-            defer commit_positions.deinit();
-            try commit_positions.ensureTotalCapacity(8192);
+            // Walk commit-graph, extract authors from cache + pack fallback
+            var stack = std.array_list.Managed(u32).init(allocator);
+            try stack.ensureTotalCapacity(4096);
+            defer stack.deinit();
 
-            {
-                var stack = std.array_list.Managed(u32).init(allocator);
-                try stack.ensureTotalCapacity(4096);
-                defer stack.deinit();
+            if (cg.findCommit(start_commit)) |pos| {
+                try stack.append(pos);
+                while (stack.items.len > 0) {
+                    const cur = stack.items[stack.items.len - 1];
+                    stack.items.len -= 1;
 
-                if (cg.findCommit(start_commit)) |pos| {
-                    try stack.append(pos);
-                    while (stack.items.len > 0) {
-                        const cur = stack.items[stack.items.len - 1];
-                        stack.items.len -= 1;
+                    const word_idx = cur / 64;
+                    const bit_mask = @as(u64, 1) << @truncate(cur % 64);
+                    if (bits[word_idx] & bit_mask != 0) continue;
+                    bits[word_idx] |= bit_mask;
 
-                        const word_idx = cur / 64;
-                        const bit_mask = @as(u64, 1) << @truncate(cur % 64);
-                        if (bits[word_idx] & bit_mask != 0) continue;
-                        bits[word_idx] |= bit_mask;
-
-                        commit_positions.appendAssumeCapacity(cur);
-
-                        const cd = cg.getCommitData(cur);
-                        if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
-                            stack.append(cd.parent1) catch {};
-                        }
-                        if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
-                            stack.append(cd.parent2) catch {};
-                        }
-                    }
-                }
-            }
-
-            if (debug_timing) {
-                const dt = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e6;
-                std.debug.print("graph walk ({d} commits): {d:.1}ms\n", .{commit_positions.items.len, dt});
-            }
-
-            // Phase 2: For each commit, look up pack offset, then sort by offset for cache-friendly access
-            const PosAndOffset = struct { cg_pos: u32, pack_idx: u16, pack_offset: u48 };
-            var sorted_commits = std.array_list.Managed(PosAndOffset).init(allocator);
-            defer sorted_commits.deinit();
-            try sorted_commits.ensureTotalCapacity(commit_positions.items.len);
-
-            for (commit_positions.items) |cg_pos| {
-                const oid_bytes = cg.getOidBytes(cg_pos);
-                for (0..num_packs) |pi| {
-                    if (objects.findOffsetInIdx(idx_data_arr[pi], oid_bytes.*)) |offset| {
-                        sorted_commits.appendAssumeCapacity(.{
-                            .cg_pos = cg_pos,
-                            .pack_idx = @intCast(pi),
-                            .pack_offset = @intCast(offset),
-                        });
-                        break;
-                    }
-                }
-            }
-
-            // Sort by pack offset for sequential access
-            std.mem.sort(PosAndOffset, sorted_commits.items, {}, struct {
-                fn cmp(_: void, a: PosAndOffset, b: PosAndOffset) bool {
-                    if (a.pack_idx != b.pack_idx) return a.pack_idx < b.pack_idx;
-                    return a.pack_offset < b.pack_offset;
-                }
-            }.cmp);
-
-            if (debug_timing) {
-                const dt = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e6;
-                std.debug.print("idx lookup + sort: {d:.1}ms\n", .{dt});
-            }
-
-            // Phase 3: Process each commit in pack-offset order
-            for (sorted_commits.items) |entry| {
-                const pack_data = pack_data_arr[entry.pack_idx];
-                const idx_data = idx_data_arr[entry.pack_idx];
-
-                var commit_data: ?[]const u8 = null;
-                var obj_holder: ?objects.GitObject = null;
-
-                if (objects.readPackCommitHeaderPartial(pack_data, idx_data, entry.pack_offset)) |data| {
-                    commit_data = data;
-                }
-                if (commit_data == null) {
+                    // Get commit data from cache (filled by preload) or pack
                     var hash_hex: [40]u8 = undefined;
-                    cg.getOidHex(entry.cg_pos, &hash_hex);
-                    if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
-                        obj_holder = obj;
-                        commit_data = obj.data;
-                    } else |_| {}
-                }
-                defer if (obj_holder) |obj| obj.deinit(allocator);
+                    cg.getOidHex(cur, &hash_hex);
 
-                if (commit_data) |data| {
-                    addToAuthorMap(allocator, &author_map, data, email);
+                    var commit_data: ?[]const u8 = null;
+                    var obj_holder: ?objects.GitObject = null;
+
+                    if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
+                        commit_data = borrowed.data;
+                    }
+                    if (commit_data == null) {
+                        const oid_bytes = cg.getOidBytes(cur);
+                        for (0..num_packs) |pi| {
+                            if (objects.findOffsetInIdx(idx_data_arr[pi], oid_bytes.*)) |offset| {
+                                if (objects.readPackCommitHeaderPartial(pack_data_arr[pi], idx_data_arr[pi], offset)) |data| {
+                                    commit_data = data;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (commit_data == null) {
+                        if (objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator)) |obj| {
+                            obj_holder = obj;
+                            commit_data = obj.data;
+                        } else |_| {}
+                    }
+                    defer if (obj_holder) |obj| obj.deinit(allocator);
+
+                    if (commit_data) |data| {
+                        addToAuthorMap(allocator, &author_map, data, email, summary);
+                    }
+
+                    const cd = cg.getCommitData(cur);
+                    if (cd.parent1 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT) {
+                        stack.append(cd.parent1) catch {};
+                    }
+                    if (cd.parent2 != commit_graph_mod.CommitGraph.GRAPH_NO_PARENT and cd.parent2 & commit_graph_mod.CommitGraph.GRAPH_EXTRA_EDGES == 0) {
+                        stack.append(cd.parent2) catch {};
+                    }
                 }
             }
         }
-    if (debug_timing) {
-        const dt = @as(f64, @floatFromInt(std.time.nanoTimestamp() - t0)) / 1e6;
-        std.debug.print("pack reading done: {d:.1}ms\n", .{dt});
-    }
     } else {
         // Fallback: regular object loading (no commit-graph)
         var visited = std.StringHashMap(void).init(allocator);
@@ -269,7 +217,7 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
             defer obj.deinit(allocator);
             if (obj.type != .commit) continue;
 
-            addToAuthorMap(allocator, &author_map, obj.data, email);
+            addToAuthorMap(allocator, &author_map, obj.data, email, summary);
 
             var lines = std.mem.splitScalar(u8, obj.data, '\n');
             while (lines.next()) |line| {
@@ -387,20 +335,25 @@ fn extractSubject(data: []const u8) []const u8 {
     return "";
 }
 
-fn addToAuthorMap(allocator: std.mem.Allocator, author_map: *std.StringHashMap(AuthorEntry), data: []const u8, include_email: bool) void {
+fn addToAuthorMap(allocator: std.mem.Allocator, author_map: *std.StringHashMap(AuthorEntry), data: []const u8, include_email: bool, summary_only: bool) void {
     const author = extractAuthor(data, include_email);
     if (author.len == 0) return;
-    const subject = extractSubject(data);
 
     if (author_map.getPtr(author)) |entry| {
         entry.count += 1;
-        if (subject.len > 0) {
-            entry.subjects.append(allocator, allocator.dupe(u8, subject) catch return) catch {};
+        if (!summary_only) {
+            const subject = extractSubject(data);
+            if (subject.len > 0) {
+                entry.subjects.append(allocator, allocator.dupe(u8, subject) catch return) catch {};
+            }
         }
     } else {
         var subjects = std.ArrayListUnmanaged([]const u8){};
-        if (subject.len > 0) {
-            subjects.append(allocator, allocator.dupe(u8, subject) catch return) catch {};
+        if (!summary_only) {
+            const subject = extractSubject(data);
+            if (subject.len > 0) {
+                subjects.append(allocator, allocator.dupe(u8, subject) catch return) catch {};
+            }
         }
         author_map.put(allocator.dupe(u8, author) catch return, .{ .name = author, .count = 1, .subjects = subjects }) catch {};
     }
