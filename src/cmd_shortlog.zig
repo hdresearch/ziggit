@@ -75,38 +75,41 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
 
     // Try commit-graph fast path with direct pack decompression
     if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-        // Build a mapping from commit-graph OID to pack offset for fast access
-        // First, get cached pack/idx data
-        var pack_data_ref: ?[]const u8 = null;
-        var idx_data_ref: ?[]const u8 = null;
+        // Setup direct pack access (multiple packs)
+        var pack_refs: [8][]const u8 = undefined;
+        var idx_refs: [8][]const u8 = undefined;
+        var num_packs: usize = 0;
         if (pack_dir_path) |pdp| {
             var pack_dir = std.fs.cwd().openDir(pdp, .{ .iterate = true }) catch null;
             if (pack_dir) |*pd| {
                 defer pd.close();
                 var pit = pd.iterate();
                 while (pit.next() catch null) |pentry| {
-                    if (pentry.kind != .file) continue;
-                    if (!std.mem.endsWith(u8, pentry.name, ".idx")) continue;
+                    if (num_packs >= 8) break;
+                    if (pentry.kind != .file or !std.mem.endsWith(u8, pentry.name, ".idx")) continue;
                     const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pdp, pentry.name }) catch continue;
                     defer allocator.free(idx_path);
                     const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pdp, pentry.name[0 .. pentry.name.len - 4] }) catch continue;
                     defer allocator.free(pp);
-                    // Get or cache idx and pack data
-                    idx_data_ref = objects.getCachedIdx(idx_path) orelse blk: {
+                    const idx_d = objects.getCachedIdx(idx_path) orelse blk: {
                         if (objects.mmapFile(idx_path)) |mapped| {
                             objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
                             break :blk @as([]const u8, mapped);
                         }
                         break :blk null;
                     };
-                    pack_data_ref = objects.getCachedPack(pp) orelse blk: {
+                    const pack_d = objects.getCachedPack(pp) orelse blk: {
                         if (objects.mmapFile(pp)) |mapped| {
                             objects.addToCacheEx(allocator, "", "", false, pp, mapped, true);
                             break :blk @as([]const u8, mapped);
                         }
                         break :blk null;
                     };
-                    if (pack_data_ref != null and idx_data_ref != null) break;
+                    if (idx_d != null and pack_d != null) {
+                        idx_refs[num_packs] = idx_d.?;
+                        pack_refs[num_packs] = pack_d.?;
+                        num_packs += 1;
+                    }
                 }
             }
         }
@@ -130,21 +133,21 @@ pub fn cmdShortlog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgI
                 cg.getOidHex(cur, &hash_hex);
 
                 const author_data: ?[]const u8 = blk: {
-                    // Try zero-copy cache borrow first
-                    if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
-                        break :blk borrowed.data;
-                    }
-                    // Try direct pack decompression into reusable buffer
-                    if (pack_data_ref != null and idx_data_ref != null) {
+                    // Try direct pack decompression (zero-alloc) across all packs
+                    if (num_packs > 0) {
                         var oid_bytes: [20]u8 = undefined;
                         _ = std.fmt.hexToBytes(&oid_bytes, &hash_hex) catch break :blk null;
-                        if (objects.findOffsetInIdx(idx_data_ref.?, oid_bytes)) |offset| {
-                            if (objects.decompressPackObjectInPlace(pack_data_ref.?, offset)) |result| {
-                                if (result.obj_type == 1) { // commit
-                                    break :blk result.data;
+                        for (0..num_packs) |pi| {
+                            if (objects.findOffsetInIdx(idx_refs[pi], oid_bytes)) |offset| {
+                                if (objects.decompressPackObjectInPlace(pack_refs[pi], offset)) |result| {
+                                    if (result.obj_type == 1) break :blk result.data;
                                 }
                             }
                         }
+                    }
+                    // Try zero-copy cache borrow
+                    if (objects.objectCacheBorrow(&hash_hex)) |borrowed| {
+                        break :blk borrowed.data;
                     }
                     break :blk null;
                 };
