@@ -2495,7 +2495,10 @@ pub const Repository = struct {
         // SHA table starts at offset 1032
         const sha_table_offset: usize = 1032;
 
-        // Binary search in the SHA-1 table
+        // Binary search in the SHA-1 table.
+        // PERF: Compare first 4 bytes as u32 (big-endian) for fast shortcut,
+        // then fall back to full 20-byte comparison only on first-4 match.
+        const target_prefix = std.mem.readInt(u32, target_hash[0..4], .big);
         var low = lo;
         var high = hi;
         while (low < high) {
@@ -2504,12 +2507,22 @@ pub const Repository = struct {
             if (entry_offset + 20 > idx_data.len) return error.InvalidIdx;
             const entry_sha = idx_data[entry_offset..][0..20];
 
-            const order = std.mem.order(u8, entry_sha, target_hash);
-            if (order == .lt) {
+            // Fast 4-byte prefix comparison
+            const entry_prefix = std.mem.readInt(u32, entry_sha[0..4], .big);
+            if (entry_prefix < target_prefix) {
                 low = mid + 1;
-            } else if (order == .gt) {
+            } else if (entry_prefix > target_prefix) {
                 high = mid;
             } else {
+                // Prefix matches — do full 20-byte comparison
+                const order = std.mem.order(u8, entry_sha, target_hash);
+                if (order == .lt) {
+                    low = mid + 1;
+                    continue;
+                } else if (order == .gt) {
+                    high = mid;
+                    continue;
+                }
                 // Found! Now read offset from offset table
                 // CRC table: sha_table_offset + total_objects * 20
                 // Offset table: sha_table_offset + total_objects * 20 + total_objects * 4
