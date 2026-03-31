@@ -355,9 +355,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
     if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null and !show_graph) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-            // Setup direct pack access for zero-alloc decompression
-            var pack_data_ref: ?[]const u8 = null;
-            var idx_data_ref: ?[]const u8 = null;
+            // Setup direct pack access for zero-alloc decompression (multiple packs)
+            var pack_refs: [8][]const u8 = undefined;
+            var idx_refs: [8][]const u8 = undefined;
+            var num_packs: usize = 0;
             {
                 const pdp = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_path}) catch null;
                 defer if (pdp) |p| allocator.free(p);
@@ -367,26 +368,31 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                         defer pd.close();
                         var pit = pd.iterate();
                         while (pit.next() catch null) |pentry| {
+                            if (num_packs >= 8) break;
                             if (pentry.kind != .file or !std.mem.endsWith(u8, pentry.name, ".idx")) continue;
                             const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, pentry.name }) catch continue;
                             defer allocator.free(idx_path);
                             const pp = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pack_dir_path, pentry.name[0 .. pentry.name.len - 4] }) catch continue;
                             defer allocator.free(pp);
-                            idx_data_ref = objects.getCachedIdx(idx_path) orelse blk: {
+                            const idx_d = objects.getCachedIdx(idx_path) orelse blk: {
                                 if (objects.mmapFile(idx_path)) |mapped| {
                                     objects.addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
                                     break :blk @as([]const u8, mapped);
                                 }
                                 break :blk null;
                             };
-                            pack_data_ref = objects.getCachedPack(pp) orelse blk: {
+                            const pack_d = objects.getCachedPack(pp) orelse blk: {
                                 if (objects.mmapFile(pp)) |mapped| {
                                     objects.addToCacheEx(allocator, "", "", false, pp, mapped, true);
                                     break :blk @as([]const u8, mapped);
                                 }
                                 break :blk null;
                             };
-                            if (pack_data_ref != null and idx_data_ref != null) break;
+                            if (idx_d != null and pack_d != null) {
+                                idx_refs[num_packs] = idx_d.?;
+                                pack_refs[num_packs] = pack_d.?;
+                                num_packs += 1;
+                            }
                         }
                     }
                 }
@@ -427,13 +433,15 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     // Try zero-alloc decompression, then cache borrow, then full load
                     var _fallback_obj: ?objects.GitObject = null;
                     const cdata: []const u8 = blk: {
-                        // Try direct pack decompression (no allocation)
-                        if (pack_data_ref != null and idx_data_ref != null) {
+                        // Try direct pack decompression (no allocation) across all packs
+                        if (num_packs > 0) {
                             var oid_bytes: [20]u8 = undefined;
                             _ = std.fmt.hexToBytes(&oid_bytes, hash_slice) catch break :blk &[_]u8{};
-                            if (objects.findOffsetInIdx(idx_data_ref.?, oid_bytes)) |offset| {
-                                if (objects.decompressPackObjectInPlace(pack_data_ref.?, offset)) |result| {
-                                    if (result.obj_type == 1) break :blk result.data;
+                            for (0..num_packs) |pi| {
+                                if (objects.findOffsetInIdx(idx_refs[pi], oid_bytes)) |offset| {
+                                    if (objects.decompressPackObjectInPlace(pack_refs[pi], offset)) |result| {
+                                        if (result.obj_type == 1) break :blk result.data;
+                                    }
                                 }
                             }
                         }
@@ -513,6 +521,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
     }
 
+    // Preload commits for fast cache access during walk
+    objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+
+    // Open commit-graph for fast timestamp lookups
+    const maybe_cg = commit_graph_mod.CommitGraph.open(git_path, allocator);
+
     // helpers.Walk the commit history using priority queue (sorted by committer date)
     const CommitQueueEntry = struct {
         hash: []const u8,
@@ -566,15 +580,51 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         }
     }
 
+    // Fast timestamp lookup using commit-graph or cache
+    const getTs = struct {
+        fn get(hash: []const u8, cg: ?commit_graph_mod.CommitGraph, gp: []const u8, pi: *const platform_mod.Platform, alloc: std.mem.Allocator) i64 {
+            // Try commit-graph first (no decompression needed)
+            if (cg) |g| {
+                if (g.findCommit(hash)) |pos| {
+                    return g.getCommitData(pos).commit_time;
+                }
+            }
+            // Try cache borrow (zero-copy)
+            if (objects.objectCacheBorrow(hash)) |borrowed| {
+                return extractTimestamp(borrowed.data);
+            }
+            return helpers.getCommitTimestamp(hash, gp, pi, alloc);
+        }
+        fn extractTimestamp(data: []const u8) i64 {
+            var pos: usize = 0;
+            while (pos < data.len) {
+                const nl = std.mem.indexOfScalarPos(u8, data, pos, '\n') orelse data.len;
+                const line = data[pos..nl];
+                if (line.len == 0) break;
+                if (line.len > 10 and line[0] == 'c' and std.mem.startsWith(u8, line, "committer ")) {
+                    if (std.mem.indexOf(u8, line, "> ")) |gt| {
+                        const rest = line[gt + 2 ..];
+                        if (std.mem.indexOf(u8, rest, " ")) |sp| {
+                            return std.fmt.parseInt(i64, rest[0..sp], 10) catch 0;
+                        }
+                        return std.fmt.parseInt(i64, rest, 10) catch 0;
+                    }
+                }
+                pos = nl + 1;
+            }
+            return 0;
+        }
+    };
+
     // Seed the queue with the start commit (and any additional include refs)
-    const start_ts = helpers.getCommitTimestamp(start_commit, git_path, platform_impl, allocator);
+    const start_ts = getTs.get(start_commit, maybe_cg, git_path, platform_impl, allocator);
     try queue.append(.{ .hash = try allocator.dupe(u8, start_commit), .timestamp = start_ts });
     try visited.put(try allocator.dupe(u8, start_commit), {});
     // Add additional include refs
     for (include_refs.items) |inc_ref| {
         const inc_hash = helpers.resolveCommittish(git_path, inc_ref, platform_impl, allocator) catch continue;
         if (!visited.contains(inc_hash)) {
-            const inc_ts = helpers.getCommitTimestamp(inc_hash, git_path, platform_impl, allocator);
+            const inc_ts = getTs.get(inc_hash, maybe_cg, git_path, platform_impl, allocator);
             try queue.append(.{ .hash = try allocator.dupe(u8, inc_hash), .timestamp = inc_ts });
             try visited.put(try allocator.dupe(u8, inc_hash), {});
         }
@@ -802,7 +852,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 // Add parents to queue and continue without displaying
                 for (parent_hashes) |ph| {
                     if (!visited.contains(ph)) {
-                        const ts = helpers.getCommitTimestamp(ph, git_path, platform_impl, allocator);
+                        const ts = getTs.get(ph, maybe_cg, git_path, platform_impl, allocator);
                         try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
                         try visited.put(try allocator.dupe(u8, ph), {});
                     }
@@ -814,7 +864,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 // Add parents to queue and continue without displaying
                 for (parent_hashes) |ph| {
                     if (!visited.contains(ph)) {
-                        const ts = helpers.getCommitTimestamp(ph, git_path, platform_impl, allocator);
+                        const ts = getTs.get(ph, maybe_cg, git_path, platform_impl, allocator);
                         try queue.append(.{ .hash = try allocator.dupe(u8, ph), .timestamp = ts });
                         try visited.put(try allocator.dupe(u8, ph), {});
                     }
@@ -924,7 +974,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 if (!visited.contains(parent)) {
                     try visited.put(try allocator.dupe(u8, parent), {});
                     // Load parent to get timestamp (object cache will hold it for display pass)
-                    const pts = helpers.getCommitTimestamp(parent, git_path, platform_impl, allocator);
+                    const pts = getTs.get(parent, maybe_cg, git_path, platform_impl, allocator);
                     try queue.append(.{ .hash = try allocator.dupe(u8, parent), .timestamp = pts });
                 }
             }
