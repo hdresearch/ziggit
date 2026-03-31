@@ -34,6 +34,7 @@ const zlib_compat_mod = helpers.zlib_compat_mod;
 const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
+const isTrailerLine = helpers.isTrailerLine;
 
 pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {

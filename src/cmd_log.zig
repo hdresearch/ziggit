@@ -22,11 +22,16 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
-pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("log: not supported in freestanding mode\n");
         return;
     }
+    // Use c_allocator for performance: GPA uses mmap/munmap per alloc which is ~100x slower
+    const allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
+        std.heap.c_allocator
+    else
+        passed_allocator;
 
     var oneline = false;
     var format_string: ?[]const u8 = null;
@@ -335,8 +340,8 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
     if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
-            // Bulk-preload all commit objects from packs into cache for fast access
-            objects.preloadCommitsFromPacks(git_path, platform_impl, allocator);
+            // NOTE: preloadCommitsFromPacks removed — with commit-graph + object cache,
+            // lazy loading per-commit is faster than eager bulk decompression.
             // Fast path: use commit-graph for traversal, only load objects for message
             var cg_queue = std.array_list.Managed(struct { pos: u32, hash_hex: [40]u8, timestamp: i64 }).init(allocator);
             defer cg_queue.deinit();
@@ -475,7 +480,9 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         defer exc_queue.deinit();
         try exc_queue.append(try allocator.dupe(u8, exc_hash));
         while (exc_queue.items.len > 0) {
-            const h = exc_queue.pop();
+            const h_idx = exc_queue.items.len - 1;
+            const h = exc_queue.items[h_idx];
+            exc_queue.items.len = h_idx;
             if (excluded.contains(h)) { allocator.free(h); continue; }
             try excluded.put(h, {});
             // Get parents
@@ -890,7 +897,7 @@ fn displayNote(git_path: []const u8, commit_hash: []const u8, allocator: std.mem
     defer allocator.free(notes_ref);
 
     // Resolve notes ref to a commit hash
-    const notes_commit = refs.resolveRef(git_path, notes_ref, platform_impl, allocator) catch return error.NotFound;
+    const notes_commit = (refs.resolveRef(git_path, notes_ref, platform_impl, allocator) catch return error.NotFound) orelse return error.NotFound;
     defer allocator.free(notes_commit);
 
     // Try flat path first (full hash as filename)

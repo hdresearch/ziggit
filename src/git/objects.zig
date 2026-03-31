@@ -30,34 +30,53 @@ fn initCZlib() void {
     }
 }
 
-/// Fast decompress using C zlib's uncompress (much faster than Zig's pure-Zig deflate).
+// Reusable decompression buffer to avoid mmap/munmap overhead per object.
+// GPA uses mmap for allocations > ~page_size, causing 2 syscalls per alloc+free.
+// By reusing a single buffer, we amortize that to near zero.
+var decompress_buf: ?[]u8 = null;
+var decompress_buf_size: usize = 0;
+
+fn getDecompressBuf(min_size: usize) ?[*]u8 {
+    if (decompress_buf) |buf| {
+        if (buf.len >= min_size) return buf.ptr;
+        // Need bigger buffer - free old one
+        std.heap.page_allocator.free(buf);
+        decompress_buf = null;
+        decompress_buf_size = 0;
+    }
+    // Allocate with page_allocator (stable, no GPA overhead)
+    const alloc_size = std.mem.alignForward(usize, @max(min_size, 64 * 1024), 4096);
+    const buf = std.heap.page_allocator.alloc(u8, alloc_size) catch return null;
+    decompress_buf = buf;
+    decompress_buf_size = alloc_size;
+    return buf.ptr;
+}
+
+/// Fast decompress using C zlib's uncompress.
+/// Uses a reusable scratch buffer to avoid allocation overhead, then copies
+/// the result to the caller's allocator.
 /// Returns decompressed data or null if C zlib is unavailable.
 fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?[]u8 {
     initCZlib();
     const uncompress_fn = zlib_uncompress_fn orelse return null;
-    // Start with size_hint or 4× input size
-    var dest_size: usize = if (size_hint > 0) size_hint else @min(input.len * 4, 1024 * 1024);
+    
+    // Use reusable buffer to avoid per-call mmap/munmap
+    var needed = if (size_hint > 0) size_hint else @max(input.len * 4, 4096);
     var attempts: u8 = 0;
-    while (attempts < 8) : (attempts += 1) {
-        const dest = allocator.alloc(u8, dest_size) catch return null;
-        var dest_len: c_ulong = @intCast(dest.len);
-        const ret = uncompress_fn(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
+    while (attempts < 10) : (attempts += 1) {
+        const buf_ptr = getDecompressBuf(needed) orelse return null;
+        var dest_len: c_ulong = @intCast(decompress_buf_size);
+        const ret = uncompress_fn(buf_ptr, &dest_len, input.ptr, @intCast(input.len));
         if (ret == 0) {
-            // Success - shrink to actual size
-            if (@as(usize, @intCast(dest_len)) < dest.len) {
-                const result = allocator.realloc(dest, @intCast(dest_len)) catch {
-                    return dest[0..@intCast(dest_len)];
-                };
-                return result[0..@intCast(dest_len)];
-            }
-            return dest[0..@intCast(dest_len)];
+            const actual_len = @as(usize, @intCast(dest_len));
+            const result = allocator.alloc(u8, actual_len) catch return null;
+            @memcpy(result, buf_ptr[0..actual_len]);
+            return result;
         } else if (ret == -5) {
-            // Z_BUF_ERROR - buffer too small, double it
-            allocator.free(dest);
-            dest_size *= 2;
+            // Z_BUF_ERROR - buffer too small, grow and retry
+            needed = needed * 2;
         } else {
-            allocator.free(dest);
-            return null;
+            return null; // Z_DATA_ERROR or other failure
         }
     }
     return null;
@@ -1212,10 +1231,11 @@ fn readPackedObject(pack_data: []const u8, offset: usize, pack_path: []const u8,
     
     switch (pack_type) {
         .commit, .tree, .blob, .tag => {
-            // Regular object - decompress, preferring C zlib for speed
+            // Regular object - decompress using C zlib for speed
             if (pos >= pack_data.len) return error.ObjectNotFound;
             
             const data = cDecompressSlice(allocator, pack_data[pos..], size) orelse
+                cDecompressSlice(allocator, pack_data[pos..], 0) orelse
                 (zlib_compat.decompressSlice(allocator, pack_data[pos..]) catch return error.ObjectNotFound);
             
             if (data.len != size) {

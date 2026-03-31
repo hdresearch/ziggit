@@ -32,17 +32,26 @@ pub const CommitGraph = struct {
         const path_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}/objects/info/commit-graph", .{git_dir}) catch return null;
         defer std.heap.page_allocator.free(path_buf);
 
-        // Try mmap
+        if (comptime (@import("builtin").target.os.tag == .freestanding or @import("builtin").target.os.tag == .wasi)) return null;
+
+        // Read file into memory (simpler than mmap, works everywhere)
         const file = std.fs.cwd().openFile(path_buf, .{}) catch return null;
         defer file.close();
         const stat = file.stat() catch return null;
         if (stat.size < 20) return null;
 
-        if (comptime (@import("builtin").target.os.tag == .freestanding or @import("builtin").target.os.tag == .wasi)) return null;
+        // Use page_allocator for the commit-graph data (lives for process lifetime)
+        const data = std.heap.page_allocator.alloc(u8, stat.size) catch return null;
+        const bytes_read = file.readAll(data) catch {
+            std.heap.page_allocator.free(data);
+            return null;
+        };
+        if (bytes_read != stat.size) {
+            std.heap.page_allocator.free(data);
+            return null;
+        }
 
-        const mapped = std.posix.mmap(null, stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, file.handle, 0) catch return null;
-
-        return parse(mapped[0..stat.size], true);
+        return parse(data[0..bytes_read], false);
     }
 
     fn parse(data: []const u8, is_mmap: bool) ?CommitGraph {
@@ -168,7 +177,11 @@ pub const CommitGraph = struct {
     pub fn getOidHex(self: *const CommitGraph, pos: u32, buf: *[40]u8) void {
         const off = self.oid_lookup_offset + @as(usize, pos) * self.hash_len;
         const oid_bytes = self.data[off .. off + 20];
-        _ = std.fmt.bufPrint(buf, "{}", .{std.fmt.fmtSliceHexLower(oid_bytes)}) catch {};
+        for (oid_bytes, 0..) |byte, i| {
+            const hex = "0123456789abcdef";
+            buf[i * 2] = hex[byte >> 4];
+            buf[i * 2 + 1] = hex[byte & 0xf];
+        }
     }
 
     /// Get extra parent edges for octopus merges (parent2 has GRAPH_EXTRA_EDGES flag).
