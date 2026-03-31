@@ -609,16 +609,41 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 platform_impl.fs.writeFile(head_path, head_content) catch {};
                 
                 // Checkout the commit's tree to working directory
-                // Use read-tree to update the index, then checkout-index to update working tree
-                const read_tree = @import("cmd_read_tree.zig");
-                var rt_args = [_][]const u8{hash};
-                var rt_iter = platform_mod.ArgIterator{ .args = &rt_args, .allocator = allocator };
-                read_tree.cmdReadTree(allocator, &rt_iter, platform_impl) catch {};
-                // Now force-checkout all files from the index
-                const checkout_idx = @import("cmd_checkout_index.zig");
-                var ci_args = [_][]const u8{ "-a", "-f" };
-                var ci_iter = platform_mod.ArgIterator{ .args = &ci_args, .allocator = allocator };
-                checkout_idx.cmdCheckoutIndex(allocator, &ci_iter, platform_impl) catch {};
+                // Parse commit to get tree hash, then read tree into index and checkout files
+                {
+                    const commit_obj = objects.GitObject.load(hash, git_path, platform_impl, allocator) catch null;
+                    defer if (commit_obj) |co| co.deinit(allocator);
+                    if (commit_obj) |co| {
+                        const tree_h = helpers.parseCommitTreeHash(co.data, allocator) catch null;
+                        defer if (tree_h) |th| allocator.free(th);
+                        if (tree_h) |th| {
+                            // Read tree into index
+                            const read_tree = @import("cmd_read_tree.zig");
+                            var new_idx = index_mod.Index.init(allocator);
+                            defer new_idx.deinit();
+                            read_tree.readTreeIntoIndex(&new_idx, git_path, th, "", platform_impl, allocator) catch {};
+                            new_idx.save(git_path, platform_impl) catch {};
+                            // Checkout all files from index to working tree
+                            const repo_root = if (std.mem.endsWith(u8, git_path, "/.git")) git_path[0 .. git_path.len - 5] else std.fs.path.dirname(git_path) orelse ".";
+                            for (new_idx.entries.items) |entry| {
+                                const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path }) catch continue;
+                                defer allocator.free(full_path);
+                                // Create parent directories
+                                if (std.fs.path.dirname(full_path)) |parent| {
+                                    std.fs.cwd().makePath(parent) catch {};
+                                }
+                                // Get blob content and write to working tree
+                                var hash_hex: [40]u8 = undefined;
+                                _ = std.fmt.bufPrint(&hash_hex, "{x}", .{&entry.sha1}) catch continue;
+                                const blob = objects.GitObject.load(&hash_hex, git_path, platform_impl, allocator) catch continue;
+                                defer blob.deinit(allocator);
+                                if (blob.type == .blob) {
+                                    std.fs.cwd().writeFile(.{ .sub_path = full_path, .data = blob.data }) catch {};
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (!quiet) {
                     const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}...\n", .{hash[0..7]});
