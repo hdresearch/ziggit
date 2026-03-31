@@ -351,9 +351,9 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         return;
     }
     
-    // Try commit-graph fast path for common cases (oneline, no filters, no excludes)
+    // Try commit-graph fast path for common cases (oneline, no excludes)
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
-    if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null and !show_graph) {
+    if (oneline and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null and !show_graph) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
             // Setup direct pack access for zero-alloc decompression (multiple packs)
             var pack_refs: [8][]const u8 = undefined;
@@ -457,37 +457,88 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     };
                     defer if (_fallback_obj) |obj| obj.deinit(allocator);
 
-                    // Extract first line of message
+                    // Parse headers and extract first message line in one pass
                     var first_msg_line: []const u8 = "";
+                    var cg_author_line: []const u8 = "";
+                    var cg_committer_line: []const u8 = "";
+                    var cg_msg_text: []const u8 = "";
                     {
                         var pos: usize = 0;
                         while (pos < cdata.len) {
                             const nl = std.mem.indexOfScalarPos(u8, cdata, pos, '\n') orelse cdata.len;
-                            if (nl == pos) {
-                                const msg_start = pos + 1;
+                            const line = cdata[pos..nl];
+                            if (line.len == 0) {
+                                const msg_start = nl + 1;
                                 if (msg_start < cdata.len) {
+                                    cg_msg_text = cdata[msg_start..];
                                     const msg_end = std.mem.indexOfScalarPos(u8, cdata, msg_start, '\n') orelse cdata.len;
                                     first_msg_line = cdata[msg_start..msg_end];
                                 }
                                 break;
                             }
+                            if (line.len > 7 and line[0] == 'a' and std.mem.startsWith(u8, line, "author ")) {
+                                cg_author_line = line[7..];
+                            } else if (line.len > 10 and line[0] == 'c' and std.mem.startsWith(u8, line, "committer ")) {
+                                cg_committer_line = line[10..];
+                            }
                             pos = nl + 1;
                         }
                     }
 
-                    // Write oneline output
-                    try out_buf.appendSlice(hash_slice[0..7]);
-                    try out_buf.append(' ');
-                    try out_buf.appendSlice(first_msg_line);
-                    try out_buf.append('\n');
+                    // Apply filters if needed
+                    if (has_filters) {
+                        const show = cgFilter: {
+                            if (author_filters.items.len > 0) {
+                                var any = false;
+                                for (author_filters.items) |af| {
+                                    if (matchesFilter(cg_author_line, af, fixed_strings, ignore_case)) { any = true; break; }
+                                }
+                                if (!any) break :cgFilter false;
+                            }
+                            if (committer_filters.items.len > 0) {
+                                var any = false;
+                                for (committer_filters.items) |cf| {
+                                    if (matchesFilter(cg_committer_line, cf, fixed_strings, ignore_case)) { any = true; break; }
+                                }
+                                if (!any) break :cgFilter false;
+                            }
+                            if (grep_filters.items.len > 0) {
+                                if (all_match) {
+                                    for (grep_filters.items) |gf| {
+                                        if (!matchesFilter(cg_msg_text, gf, fixed_strings, ignore_case)) break :cgFilter false;
+                                    }
+                                } else {
+                                    var any = false;
+                                    for (grep_filters.items) |gf| {
+                                        if (matchesFilter(cg_msg_text, gf, fixed_strings, ignore_case)) { any = true; break; }
+                                    }
+                                    if (!any) break :cgFilter false;
+                                }
+                            }
+                            break :cgFilter true;
+                        };
+                        const filter_result = if (invert_grep and grep_filters.items.len > 0) !show else show;
+                        if (filter_result) {
+                            try out_buf.appendSlice(hash_slice[0..7]);
+                            try out_buf.append(' ');
+                            try out_buf.appendSlice(first_msg_line);
+                            try out_buf.append('\n');
+                            cg_count += 1;
+                        }
+                    } else {
+                        // No filters - always output
+                        try out_buf.appendSlice(hash_slice[0..7]);
+                        try out_buf.append(' ');
+                        try out_buf.appendSlice(first_msg_line);
+                        try out_buf.append('\n');
+                        cg_count += 1;
+                    }
 
                     // Flush buffer periodically
                     if (out_buf.items.len > 128 * 1024) {
                         try platform_impl.writeStdout(out_buf.items);
                         out_buf.clearRetainingCapacity();
                     }
-
-                    cg_count += 1;
 
                     // Add parents from commit-graph
                     const parent_data = cg.getCommitData(current.pos);
@@ -653,25 +704,30 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         // Skip excluded commits (from ^ref arguments)
         if (excluded.contains(cur_hash)) continue;
 
-        // helpers.Load commit object
-        const commit_object = objects.GitObject.load(cur_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
-            error.ObjectNotFound => {
-                const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{cur_hash});
-                defer allocator.free(msg);
-                try platform_impl.writeStderr(msg);
+        // helpers.Load commit object - try zero-copy borrow first, fall back to full load
+        var _owned_obj: ?objects.GitObject = null;
+        const commit_data: []const u8 = blk: {
+            if (objects.objectCacheBorrow(cur_hash)) |borrowed| {
+                if (borrowed.obj_type == .commit) break :blk borrowed.data;
+            }
+            _owned_obj = objects.GitObject.load(cur_hash, git_path, platform_impl, allocator) catch |err| switch (err) {
+                error.ObjectNotFound => {
+                    const msg = try std.fmt.allocPrint(allocator, "fatal: bad object {s}\n", .{cur_hash});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                    return;
+                },
+                else => return err,
+            };
+            if (_owned_obj.?.type != .commit) {
+                try platform_impl.writeStderr("fatal: not a commit object\n");
                 return;
-            },
-            else => return err,
+            }
+            break :blk _owned_obj.?.data;
         };
-        defer commit_object.deinit(allocator);
-
-        if (commit_object.type != .commit) {
-            try platform_impl.writeStderr("fatal: not a commit object\n");
-            return;
-        }
+        defer if (_owned_obj) |obj| obj.deinit(allocator);
 
         // helpers.Parse commit data - extract parents, author, committer timestamp, and message start in one pass
-        const commit_data = commit_object.data;
         
         var parent_hashes_buf: [16][]const u8 = undefined;
         var parent_count: usize = 0;
