@@ -2595,7 +2595,7 @@ pub const Repository = struct {
     }
 
     /// Handle OFS_DELTA pack objects — reuses already-loaded pack_data
-    fn readOfsDeltaObject(self: *Repository, pack_data: []const u8, start_pos: usize, _: u64, current_offset: u64) ObjectReadError![]u8 {
+    fn readOfsDeltaObject(self: *Repository, pack_data: []const u8, start_pos: usize, delta_size: u64, current_offset: u64) ObjectReadError![]u8 {
         var pos = start_pos;
         // Read negative offset (variable-length encoding)
         var byte = pack_data[pos];
@@ -2615,8 +2615,10 @@ pub const Repository = struct {
         const base_obj = try self.readPackObjectFromData(pack_data, base_offset);
         defer fa.free(base_obj);
 
-        // Decompress delta data — use c_allocator for temp buffers
-        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
+        // Decompress delta data — pass size hint for direct allocation (avoids scratch buffer)
+        const delta_sz = @as(usize, @intCast(delta_size));
+        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], delta_sz) orelse
+            objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
             (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
         defer fa.free(delta_data);
 
@@ -2625,7 +2627,7 @@ pub const Repository = struct {
     }
 
     /// Handle REF_DELTA pack objects — reuses already-loaded pack_data
-    fn readRefDeltaObject(self: *Repository, pack_data: []const u8, start_pos: usize, _: u64) ObjectReadError![]u8 {
+    fn readRefDeltaObject(self: *Repository, pack_data: []const u8, start_pos: usize, delta_size: u64) ObjectReadError![]u8 {
         var pos = start_pos;
         if (pos + 20 > pack_data.len) return error.InvalidPackObject;
         const base_hash_bytes = pack_data[pos..pos + 20];
@@ -2639,8 +2641,10 @@ pub const Repository = struct {
         const base_obj = try self.readRawObject(&base_hash_hex);
         defer fa.free(base_obj);
 
-        // Decompress delta data — use c_allocator for temp buffers
-        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
+        // Decompress delta data — pass size hint for direct allocation (avoids scratch buffer)
+        const delta_sz = @as(usize, @intCast(delta_size));
+        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], delta_sz) orelse
+            objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
             (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
         defer fa.free(delta_data);
 
@@ -2845,7 +2849,11 @@ pub const Repository = struct {
                     pos = sha_start + 20;
                     continue;
                 };
-                std.fs.cwd().makePath(subdir_path) catch {};
+                // Use single-level mkdir since parent is guaranteed to exist from recursive tree walk
+                std.fs.makeDirAbsolute(subdir_path) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => std.fs.cwd().makePath(subdir_path) catch {},
+                };
                 // Build subprefix on stack
                 var prefix_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const subprefix = if (prefix.len == 0)
@@ -2889,11 +2897,6 @@ pub const Repository = struct {
             file.close();
             return;
         };
-        // Use fstat to get mtime — cheaper than clock_gettime since fd is already open
-        const stat = file.stat() catch {
-            file.close();
-            return;
-        };
         file.close();
 
         // Build index entry path using fast allocator for short-lived strings
@@ -2902,11 +2905,13 @@ pub const Repository = struct {
         else
             std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, filename }) catch return;
 
+        // Skip per-file fstat — use 0 for timestamps (git re-stats on next status)
+        // This saves one syscall per file during checkout.
         git_index.entries.append(index_parser.IndexEntry{
-            .ctime_seconds = @intCast(@max(0, @divTrunc(stat.ctime, 1_000_000_000))),
-            .ctime_nanoseconds = @intCast(@max(0, @mod(stat.ctime, 1_000_000_000))),
-            .mtime_seconds = @intCast(@max(0, @divTrunc(stat.mtime, 1_000_000_000))),
-            .mtime_nanoseconds = @intCast(@max(0, @mod(stat.mtime, 1_000_000_000))),
+            .ctime_seconds = 0,
+            .ctime_nanoseconds = 0,
+            .mtime_seconds = 0,
+            .mtime_nanoseconds = 0,
             .dev = 0,
             .ino = 0,
             .mode = if (std.mem.eql(u8, mode, "100755")) 33261 else 33188,

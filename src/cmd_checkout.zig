@@ -752,15 +752,28 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         }
 
         // Check for dirty working tree files that would be overwritten
-        if (!force) {
+        if (!force) dirty_check: {
             const objects_mod = @import("git/objects.zig");
+            
+            // PERF: Skip expensive dirty check when target == current HEAD.
+            // If we're checking out the same commit, all index entries match
+            // the target tree, so no files can be overwritten.
+            const current_head = (refs.resolveRef(git_path, "HEAD", platform_impl, allocator) catch null) orelse null;
+            if (current_head) |ch| {
+                defer allocator.free(ch);
+                const target_commit_hash_check = repo.findCommit(actual_target) catch null;
+                if (target_commit_hash_check) |tch| {
+                    if (std.mem.eql(u8, ch, &tch)) break :dirty_check;
+                }
+            }
+            
             var idx = index_mod.Index.load(git_path, platform_impl, allocator) catch index_mod.Index.init(allocator);
             defer idx.deinit();
 
             // Resolve target commit's tree
             const target_commit_hash = repo.findCommit(actual_target) catch null;
-            const target_tree_hash: ?[]u8 = if (target_commit_hash) |ch| blk: {
-                const commit_obj = objects_mod.GitObject.load(&ch, git_path, platform_impl, allocator) catch break :blk null;
+            const target_tree_hash: ?[]u8 = if (target_commit_hash) |ch2| blk: {
+                const commit_obj = objects_mod.GitObject.load(&ch2, git_path, platform_impl, allocator) catch break :blk null;
                 defer commit_obj.deinit(allocator);
                 break :blk helpers.parseCommitTreeHash(commit_obj.data, allocator) catch null;
             } else null;
@@ -798,9 +811,18 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     // File doesn't exist in target - deletion; check if modified
                 }
 
-                // Check if working tree file differs from index
+                // PERF: Fast path — if file mtime matches index mtime and size matches,
+                // the file is clean (no need to read+hash).
                 const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root2, entry.path }) catch continue;
                 defer allocator.free(full_path);
+                
+                if (entry.mtime_sec != 0) {
+                    const stat = std.fs.cwd().statFile(full_path) catch continue;
+                    const file_mtime_s: u32 = @intCast(@max(0, @divTrunc(stat.mtime, 1_000_000_000)));
+                    const file_size: u32 = @intCast(@min(stat.size, std.math.maxInt(u32)));
+                    if (file_mtime_s == entry.mtime_sec and file_size == entry.size) continue;
+                }
+                
                 const wt_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
                 defer allocator.free(wt_content);
                 const wt_hash = helpers.hashBlobContent(wt_content, allocator) catch continue;
