@@ -882,7 +882,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "commit")) {
         try cmd_commit.cmdCommit(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "log")) {
-        try diff_cmd_mod.cmdLog(allocator, &args_iter, &platform_impl);
+        try cmd_log.cmdLog(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "diff")) {
         try diff_cmd_mod.cmdDiff(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "branch")) {
