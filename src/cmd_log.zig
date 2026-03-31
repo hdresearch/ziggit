@@ -69,6 +69,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var output_encoding: ?[]const u8 = null;
     var diff_filter: ?[]const u8 = null;
     var no_renames = false;
+    var has_rev_input = false; // true if --branches/--tags/--remotes/--all/--stdin/committish given
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -182,8 +183,11 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             // Accept --default=<rev> (used as fallback when no rev given)
         } else if (std.mem.eql(u8, arg, "--default")) {
             _ = args.next(); // consume value
-        } else if (std.mem.startsWith(u8, arg, "--branches") or std.mem.startsWith(u8, arg, "--tags=") or std.mem.startsWith(u8, arg, "--remotes=") or std.mem.eql(u8, arg, "--ignore-missing") or std.mem.eql(u8, arg, "--stdin")) {
-            // Accept but ignore for now
+        } else if (std.mem.startsWith(u8, arg, "--branches") or std.mem.startsWith(u8, arg, "--tags=") or std.mem.startsWith(u8, arg, "--remotes=") or std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "--ignore-missing") or std.mem.eql(u8, arg, "--stdin")) {
+            has_rev_input = true;
+            // Accept but don't fully implement yet
+        } else if (std.mem.eql(u8, arg, "--exclude-promisor-objects")) {
+            // Accept but ignore (no partial clone support)
         } else if (std.mem.eql(u8, arg, "--no-renames")) {
             no_renames = true;
         } else if (std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
@@ -293,6 +297,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
 
     // helpers.Resolve starting commit
     var start_commit: []u8 = undefined;
+    if (has_rev_input and committish == null and include_refs.items.len == 0 and exclude_refs.items.len == 0) {
+        // Rev input was given (e.g., --branches=nonexistent) but resolved to nothing
+        return;
+    }
     if (committish) |commit_ref| {
         // helpers.Try to resolve committish (branch, tag, or commit hash)
         start_commit = helpers.resolveCommittish(git_path, commit_ref, platform_impl, allocator) catch {
