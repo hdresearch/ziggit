@@ -1240,11 +1240,18 @@ pub const Repository = struct {
             return;
         }
         
-        // 2. Recursively checkout tree to working directory
-        try self.checkoutTree(&tree_hash, self.path);
+        // 2. Recursively checkout tree to working directory AND build index in one pass
+        var git_index = index_parser.GitIndex.init(self.allocator);
+        errdefer git_index.deinit();
+        try self.checkoutTreeAndIndex(&tree_hash, self.path, "", &git_index);
         
-        // 3. Update index to match the checked-out tree
-        try self.updateIndexFromTree(&tree_hash);
+        // 3. Write index to disk — buffered for single write syscall
+        {
+            var idx_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const index_path = std.fmt.bufPrint(&idx_path_buf, "{s}/index", .{self.git_dir}) catch unreachable;
+            try writeIndexBuffered(self._fast_alloc, index_path, git_index.entries.items);
+        }
+        git_index.deinit();
         
         // 4. Update HEAD — check if ref is a branch name and update symbolically
         try self.updateHeadForCheckout(ref, &commit_hash);
@@ -2781,6 +2788,119 @@ pub const Repository = struct {
         }
     }
 
+    /// Combined checkout + index building in a single tree walk.
+    /// This avoids reading every tree object twice (once for checkout, once for index).
+    fn checkoutTreeAndIndex(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8, prefix: []const u8, git_index: *index_parser.GitIndex) !void {
+        const fa = self._fast_alloc;
+        const tree_content = self.readObjectContentFromPack(tree_hash) catch blk: {
+            const raw = try self.readRawObject(tree_hash);
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidTreeObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(tree_content);
+
+        var pos: usize = 0;
+        while (pos < tree_content.len) {
+            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
+            const mode = tree_content[pos..space_pos];
+            const name_start = space_pos + 1;
+            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
+            const name = tree_content[name_start..null_pos_name];
+            const sha_start = null_pos_name + 1;
+            if (sha_start + 20 > tree_content.len) break;
+            const sha_bytes = tree_content[sha_start .. sha_start + 20];
+
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha_bytes}) catch break;
+
+            if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
+                // Checkout blob and add to index
+                try self.checkoutBlobAndIndex(&sha_hex, target_path, name, prefix, mode, sha_bytes, git_index);
+            } else if (std.mem.eql(u8, mode, "40000")) {
+                // Build paths
+                var subdir_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const subdir_path = std.fmt.bufPrint(&subdir_buf, "{s}/{s}", .{ target_path, name }) catch {
+                    pos = sha_start + 20;
+                    continue;
+                };
+                std.fs.cwd().makePath(subdir_path) catch {};
+                // Build subprefix on stack
+                var prefix_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const subprefix = if (prefix.len == 0)
+                    name
+                else
+                    std.fmt.bufPrint(&prefix_buf, "{s}/{s}", .{ prefix, name }) catch {
+                        pos = sha_start + 20;
+                        continue;
+                    };
+                try self.checkoutTreeAndIndex(&sha_hex, subdir_path, subprefix, git_index);
+            }
+            pos = sha_start + 20;
+        }
+    }
+
+    /// Checkout a blob and add it to the index in one step
+    fn checkoutBlobAndIndex(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8, prefix: []const u8, mode: []const u8, sha_bytes: []const u8, git_index: *index_parser.GitIndex) !void {
+        const fa = self._fast_alloc;
+        const content = self.readObjectContentFromPack(blob_hash) catch blk: {
+            const raw = self.readRawObject(blob_hash) catch return error.InvalidBlobObject;
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidBlobObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(content);
+
+        // Write file
+        var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ target_path, filename }) catch return;
+        const file = std.fs.createFileAbsolute(file_path, .{ .truncate = true }) catch return;
+        file.writeAll(content) catch {
+            file.close();
+            return;
+        };
+        // Get mtime from the file stat — we need this for the index.
+        // Use fstat on the already-open fd to avoid an extra path lookup.
+        const stat = file.stat() catch {
+            file.close();
+            return;
+        };
+        file.close();
+
+        // Build index entry path
+        const full_path = if (prefix.len == 0)
+            self.allocator.dupe(u8, filename) catch return
+        else
+            std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, filename }) catch return;
+
+        var sha_array: [20]u8 = undefined;
+        @memcpy(&sha_array, sha_bytes[0..20]);
+
+        git_index.entries.append(index_parser.IndexEntry{
+            .ctime_seconds = @intCast(@max(0, @divTrunc(stat.ctime, 1_000_000_000))),
+            .ctime_nanoseconds = @intCast(@max(0, @mod(stat.ctime, 1_000_000_000))),
+            .mtime_seconds = @intCast(@max(0, @divTrunc(stat.mtime, 1_000_000_000))),
+            .mtime_nanoseconds = @intCast(@max(0, @mod(stat.mtime, 1_000_000_000))),
+            .dev = 0,
+            .ino = 0,
+            .mode = if (std.mem.eql(u8, mode, "100755")) 33261 else 33188,
+            .uid = 0,
+            .gid = 0,
+            .size = @intCast(@min(content.len, std.math.maxInt(u32))),
+            .sha1 = sha_array,
+            .flags = @intCast(@min(full_path.len, 0xfff)),
+            .path = full_path,
+        }) catch {};
+    }
+
     fn checkoutBlob(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8) !void {
         const fa = self._fast_alloc;
         // FAST PATH: Read object content directly from pack (skip header round-trip)
@@ -2893,10 +3013,72 @@ pub const Repository = struct {
             entry.mtime_nanoseconds = @intCast(@max(0, @mod(stat.mtime, 1_000_000_000)));
         }
 
-        // Write index to disk
-        const index_path = try std.fmt.allocPrint(self.allocator, "{s}/index", .{self.git_dir});
-        defer self.allocator.free(index_path);
-        try git_index.writeToFile(index_path);
+        // Write index to disk — buffered to avoid hundreds of tiny write syscalls
+        var index_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const index_path = std.fmt.bufPrint(&index_path_buf, "{s}/index", .{self.git_dir}) catch {
+            const ip = try std.fmt.allocPrint(self.allocator, "{s}/index", .{self.git_dir});
+            defer self.allocator.free(ip);
+            try git_index.writeToFile(ip);
+            return;
+        };
+        try writeIndexBuffered(self._fast_alloc, index_path, git_index.entries.items);
+    }
+
+    /// Write git index to disk using a single write syscall (buffered in memory).
+    fn writeIndexBuffered(alloc: std.mem.Allocator, index_path: []const u8, entries: []const index_parser.IndexEntry) !void {
+        // Calculate total size
+        var total_size: usize = 12; // DIRC header (4) + version (4) + count (4)
+        for (entries) |entry| {
+            const entry_size = 62 + entry.path.len + 1; // fixed fields + path + null
+            const padding = (8 - (entry_size % 8)) % 8;
+            total_size += entry_size + padding;
+        }
+        total_size += 20; // trailing SHA-1
+
+        var buf = try alloc.alloc(u8, total_size);
+        defer alloc.free(buf);
+        var pos: usize = 0;
+
+        // Header
+        @memcpy(buf[pos..][0..4], "DIRC");
+        pos += 4;
+        std.mem.writeInt(u32, buf[pos..][0..4], 2, .big); // version
+        pos += 4;
+        std.mem.writeInt(u32, buf[pos..][0..4], @intCast(entries.len), .big);
+        pos += 4;
+
+        // Entries
+        for (entries) |entry| {
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.ctime_seconds, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.ctime_nanoseconds, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.mtime_seconds, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.mtime_nanoseconds, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.dev, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.ino, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.mode, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.uid, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.gid, .big); pos += 4;
+            std.mem.writeInt(u32, buf[pos..][0..4], entry.size, .big); pos += 4;
+            @memcpy(buf[pos..][0..20], &entry.sha1); pos += 20;
+            std.mem.writeInt(u16, buf[pos..][0..2], entry.flags, .big); pos += 2;
+            @memcpy(buf[pos..][0..entry.path.len], entry.path); pos += entry.path.len;
+            buf[pos] = 0; pos += 1;
+            const entry_size = 62 + entry.path.len + 1;
+            const padding = (8 - (entry_size % 8)) % 8;
+            if (padding > 0) {
+                @memset(buf[pos..][0..padding], 0);
+                pos += padding;
+            }
+        }
+
+        // Trailing dummy SHA-1
+        @memset(buf[pos..][0..20], 0);
+        pos += 20;
+
+        // Single write
+        const file = try std.fs.createFileAbsolute(index_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(buf[0..pos]);
     }
 
     fn addTreeToIndex(self: *Repository, git_index: *index_parser.GitIndex, tree_hash: *const [40]u8, prefix: []const u8) !void {
