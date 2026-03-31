@@ -4975,29 +4975,40 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                     try writeDiffForCommit(hash, obj.data, ph, &lo, git_path, pi, allocator);
                 }
                 continue;
+            } else if (lo.format_string == null and lo.oneline) {
+                const short = hash[0..@min(7, hash.len)];
+                const msg = extractMessage(obj.data);
+                const first_line = if (std.mem.indexOf(u8, msg, "\n")) |nl| msg[0..nl] else std.mem.trimRight(u8, msg, "\n");
+                const out = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ short, first_line });
+                defer allocator.free(out);
+                try pi.writeStdout(out);
             } else if (lo.format_string == null) {
                 try writeCommitHeader(hash, obj.data, &lo, idx == start_hashes.items.len - 1, pi, allocator, git_path);
             }
 
-            if (parents.items.len > 1) {
-                if (lo.first_parent or lo.diff_merges == .first_parent) {
-                    // show --first-parent: first-parent diff
-                    try pi.writeStdout("\n");
-                    try writeDiffForCommit(hash, obj.data, parents.items[0], &lo, git_path, pi, allocator);
-                } else if (lo.combined_style != .none or lo.diff_merges == .combined or lo.diff_merges == .dense_combined) {
-                    try pi.writeStdout("\n");
-                    try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
+            // Skip diff output if -s/--no-patch and no stat/raw modes
+            const need_diff = lo.show_patch or lo.show_stat or lo.show_raw or lo.show_summary or lo.show_shortstat or lo.name_only or lo.name_status;
+            if (need_diff) {
+                if (parents.items.len > 1) {
+                    if (lo.first_parent or lo.diff_merges == .first_parent) {
+                        // show --first-parent: first-parent diff
+                        try pi.writeStdout("\n");
+                        try writeDiffForCommit(hash, obj.data, parents.items[0], &lo, git_path, pi, allocator);
+                    } else if (lo.combined_style != .none or lo.diff_merges == .combined or lo.diff_merges == .dense_combined) {
+                        try pi.writeStdout("\n");
+                        try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
+                    } else {
+                        // Default show for merge: combined diff (--cc style)
+                        try pi.writeStdout("\n");
+                        try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
+                    }
                 } else {
-                    // Default show for merge: combined diff (--cc style)
-                    try pi.writeStdout("\n");
-                    try writeCombinedDiffForCommit(obj.data, &lo, git_path, pi, allocator);
+                    const ph = if (parents.items.len > 0) parents.items[0] else null;
+                    if ((ph != null or lo.root or lo.show_mode) and !lo.patch_with_stat) {
+                        try pi.writeStdout("\n");
+                    }
+                    try writeDiffForCommit(hash, obj.data, ph, &lo, git_path, pi, allocator);
                 }
-            } else {
-                const ph = if (parents.items.len > 0) parents.items[0] else null;
-                if ((ph != null or lo.root or lo.show_mode) and !lo.patch_with_stat) {
-                    try pi.writeStdout("\n");
-                }
-                try writeDiffForCommit(hash, obj.data, ph, &lo, git_path, pi, allocator);
             }
         }
         return;
