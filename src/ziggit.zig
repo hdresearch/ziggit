@@ -49,6 +49,8 @@ pub const Repository = struct {
     _cached_git_dir_fd: ?std.posix.fd_t = null,
     // PACKED-REFS CACHE: Avoid re-reading packed-refs for every ref lookup
     _cached_packed_refs: ?[]const u8 = null,
+    // PACK-ONLY FLAG: When true, skip loose object lookups (all objects are in packs)
+    _pack_only: bool = false,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -2333,23 +2335,35 @@ pub const Repository = struct {
     /// Caller owns the returned slice and must free it with self._fast_alloc.
     fn readRawObject(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
         const fa = self._fast_alloc;
-        // Try loose object first (stack-allocated path)
-        var obj_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const obj_path = std.fmt.bufPrint(&obj_path_buf, "{s}/objects/{s}/{s}", .{ self.git_dir, hash_hex[0..2], hash_hex[2..] }) catch return error.ObjectNotFound;
+        
+        // Skip loose object lookup when we know all objects are in packs
+        if (!self._pack_only) {
+            // Try loose object first (stack-allocated path)
+            var obj_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const obj_path = std.fmt.bufPrint(&obj_path_buf, "{s}/objects/{s}/{s}", .{ self.git_dir, hash_hex[0..2], hash_hex[2..] }) catch return error.ObjectNotFound;
 
-        if (std.fs.openFileAbsolute(obj_path, .{})) |obj_file| {
-            defer obj_file.close();
-            const compressed = obj_file.readToEndAlloc(fa, 100 * 1024 * 1024) catch return error.ObjectNotFound;
-            defer fa.free(compressed);
+            if (std.fs.openFileAbsolute(obj_path, .{})) |obj_file| {
+                defer obj_file.close();
+                const compressed = obj_file.readToEndAlloc(fa, 100 * 1024 * 1024) catch return error.ObjectNotFound;
+                defer fa.free(compressed);
 
-            // Try C zlib first (faster), fall back to Zig flate
-            return objects_mod.cDecompressSlice(fa, compressed, 0) orelse
-                (zlib_compat.decompressSlice(fa, compressed) catch
-                return error.CorruptObject);
-        } else |_| {}
+                // Try C zlib first (faster), fall back to Zig flate
+                return objects_mod.cDecompressSlice(fa, compressed, 0) orelse
+                    (zlib_compat.decompressSlice(fa, compressed) catch
+                    return error.CorruptObject);
+            } else |_| {}
+        }
 
-        // Fall back to pack files
-        return self.readObjectFromPacks(hash_hex);
+        // Fall back to / directly use pack files
+        const result = self.readObjectFromPacks(hash_hex);
+        // If pack read succeeds and we weren't in pack_only mode, enable it
+        // (heuristic: if first object comes from pack, likely all will)
+        if (!self._pack_only) {
+            if (result) |_| {
+                self._pack_only = true;
+            } else |_| {}
+        }
+        return result;
     }
 
     /// Read an object from pack files. Returns raw content with header.
