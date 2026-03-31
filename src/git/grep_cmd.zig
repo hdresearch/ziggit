@@ -1250,7 +1250,7 @@ fn walkTreeDataAndGrep(
         pos += 20;
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch continue;
+        hexEncode(hash_bytes, &hash_hex);
 
         const full_path = if (path_prefix.len > 0)
             std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, name }) catch continue
@@ -1269,13 +1269,11 @@ fn walkTreeDataAndGrep(
             const display_path = getDisplayPath(full_path, prefix, opts.full_name, allocator);
             defer allocator.free(display_path);
 
-            // Try fast pack-based blob loading (avoids allocation)
+            // Try fast pack-based blob loading using binary OID directly
             const blob_data: ?[]const u8 = blk: {
                 if (pack_data_global.len > 0) {
-                    var oid_bytes: [20]u8 = undefined;
-                    _ = std.fmt.hexToBytes(&oid_bytes, &hash_hex) catch break :blk null;
-                    if (objects.readPackObjectDirect(pack_data_global, idx_data_global, oid_bytes)) |result| {
-                        if (result.obj_type == 3) break :blk result.data; // type 3 = blob
+                    if (objects.readPackObjectDirect(pack_data_global, idx_data_global, hash_bytes[0..20].*)) |result| {
+                        if (result.obj_type == 3) break :blk result.data;
                     }
                 }
                 break :blk null;
@@ -1311,6 +1309,15 @@ fn walkTreeDataAndGrep(
 var pack_data_global: []const u8 = &.{};
 var idx_data_global: []const u8 = &.{};
 
+/// Fast hex encoding without std.fmt overhead
+fn hexEncode(bytes: []const u8, out: *[40]u8) void {
+    const hex = "0123456789abcdef";
+    for (bytes[0..20], 0..) |b, i| {
+        out[i * 2] = hex[b >> 4];
+        out[i * 2 + 1] = hex[b & 0xf];
+    }
+}
+
 fn walkTree(allocator: Allocator, git_dir: []const u8, tree_hash: []const u8, path_prefix: []const u8, files: *std.array_list.Managed(TreeFile), platform_impl: *const platform_mod.Platform) !void {
     const tree_obj = objects.GitObject.load(tree_hash, git_dir, platform_impl, allocator) catch return;
     defer tree_obj.deinit(allocator);
@@ -1334,7 +1341,7 @@ fn walkTree(allocator: Allocator, git_dir: []const u8, tree_hash: []const u8, pa
         pos += 20;
 
         var hash_hex: [40]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash_bytes}) catch continue;
+        hexEncode(hash_bytes, &hash_hex);
 
         const full_path = if (path_prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, name })
