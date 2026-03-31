@@ -1454,6 +1454,89 @@ pub fn outputFormattedCommit(format: []const u8, commit_hash: []const u8, alloca
                 const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
                 try output.append(byte_val);
                 i += 4;
+            } else if (c == 'w' and i + 2 < format.len and format[i + 2] == '(') {
+                // %w(width,indent1,indent2) - text wrapping
+                if (std.mem.indexOfScalar(u8, format[i + 2 ..], ')')) |close| {
+                    const params = format[i + 3 .. i + 2 + close];
+                    var ww: usize = 0;
+                    var wi1: usize = 0;
+                    var wi2: usize = 0;
+                    var pit = std.mem.splitScalar(u8, params, ',');
+                    if (pit.next()) |w| ww = std.fmt.parseInt(usize, std.mem.trim(u8, w, " "), 10) catch 0;
+                    if (pit.next()) |ind1| wi1 = std.fmt.parseInt(usize, std.mem.trim(u8, ind1, " "), 10) catch 0;
+                    if (pit.next()) |ind2| wi2 = std.fmt.parseInt(usize, std.mem.trim(u8, ind2, " "), 10) catch 0;
+                    i += 3 + close;
+                    // Save current output, process rest with wrapping
+                    const pre_len = output.items.len;
+                    // Continue processing remaining format into output
+                    while (i < format.len) {
+                        // Inline processing continues normally - but we need recursion
+                        break;
+                    }
+                    // Process rest of format by recursive call to get remaining text
+                    // We'll create a temporary formatted string for the rest
+                    const rest_format = format[i..];
+                    // Reset i to end to exit outer loop
+                    i = format.len;
+                    // Build rest output by continuing format parsing
+                    var rest_output = std.array_list.Managed(u8).init(allocator);
+                    defer rest_output.deinit();
+                    // Simple approach: expand rest_format manually
+                    var ri: usize = 0;
+                    while (ri < rest_format.len) {
+                        if (rest_format[ri] == '%' and ri + 1 < rest_format.len) {
+                            const rc = rest_format[ri + 1];
+                            if (rc == 's') {
+                                try rest_output.appendSlice(subject);
+                                ri += 2;
+                            } else if (rc == 'H') {
+                                try rest_output.appendSlice(commit_hash);
+                                ri += 2;
+                            } else if (rc == 'h') {
+                                try rest_output.appendSlice(if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash);
+                                ri += 2;
+                            } else if (rc == 'n') {
+                                try rest_output.append('\n');
+                                ri += 2;
+                            } else if (rc == '%') {
+                                try rest_output.append('%');
+                                ri += 2;
+                            } else if (rc == 'a' and ri + 2 < rest_format.len) {
+                                const parsed2 = parseIdentField(author_full);
+                                const spec2 = rest_format[ri + 2];
+                                if (spec2 == 'n') try rest_output.appendSlice(parsed2.name)
+                                else if (spec2 == 'e') try rest_output.appendSlice(parsed2.email)
+                                else try rest_output.appendSlice(author_full);
+                                ri += 3;
+                            } else if (rc == 'c' and ri + 2 < rest_format.len) {
+                                const parsed3 = parseIdentField(committer_full);
+                                const spec3 = rest_format[ri + 2];
+                                if (spec3 == 'n') try rest_output.appendSlice(parsed3.name)
+                                else if (spec3 == 'e') try rest_output.appendSlice(parsed3.email)
+                                else try rest_output.appendSlice(committer_full);
+                                ri += 3;
+                            } else {
+                                try rest_output.append(rest_format[ri]);
+                                ri += 1;
+                            }
+                        } else {
+                            try rest_output.append(rest_format[ri]);
+                            ri += 1;
+                        }
+                    }
+                    // Now wrap the rest_output
+                    if (ww > 0 and rest_output.items.len > 0) {
+                        const wrapped = wrapText(allocator, rest_output.items, ww, wi1, wi2) catch rest_output.items;
+                        defer if (wrapped.ptr != rest_output.items.ptr) allocator.free(wrapped);
+                        try output.appendSlice(wrapped);
+                    } else {
+                        try output.appendSlice(rest_output.items);
+                    }
+                    _ = pre_len;
+                } else {
+                    try output.append(format[i]);
+                    i += 1;
+                }
             } else {
                 try output.append(format[i]);
                 try output.append(format[i + 1]);
@@ -7020,6 +7103,45 @@ pub fn outputRevListResults(final_results: [][]u8, reverse: bool, do_count: bool
 /// Walk a tree recursively and output all tree/blob objects (inline for --in-commit-order)
 /// Format a commit according to a format string (like --pretty=format:...)
 
+fn wrapText(allocator: std.mem.Allocator, text: []const u8, width: usize, indent1: usize, indent2: usize) ![]const u8 {
+    var out = std.array_list.Managed(u8).init(allocator);
+    errdefer out.deinit();
+
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    var first_line = true;
+    while (line_iter.next()) |line| {
+        if (!first_line) try out.append('\n');
+        const indent = if (first_line) indent1 else indent2;
+        first_line = false;
+
+        if (line.len == 0) continue;
+
+        // Wrap words within the line
+        var col: usize = indent;
+        for (0..indent) |_| try out.append(' ');
+        var word_iter = std.mem.splitScalar(u8, line, ' ');
+        var first_word = true;
+        while (word_iter.next()) |word| {
+            if (word.len == 0) continue;
+            if (!first_word) {
+                if (col + 1 + word.len > width) {
+                    // Wrap to next line
+                    try out.append('\n');
+                    for (0..indent2) |_| try out.append(' ');
+                    col = indent2;
+                } else {
+                    try out.append(' ');
+                    col += 1;
+                }
+            }
+            try out.appendSlice(word);
+            col += word.len;
+            first_word = false;
+        }
+    }
+    return out.toOwnedSlice();
+}
+
 pub fn formatCommitLine(allocator: std.mem.Allocator, fmt: []const u8, hash: []const u8, data: []const u8) ![]const u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
@@ -7129,10 +7251,36 @@ pub fn formatCommitLine(allocator: std.mem.Allocator, fmt: []const u8, hash: []c
                     }
                 },
                 'w' => {
-                    // %w() - wrap, skip
+                    // %w(width,indent1,indent2) - wrap text
                     if (i + 2 < fmt.len and fmt[i + 2] == '(') {
                         if (std.mem.indexOfScalar(u8, fmt[i + 2 ..], ')')) |close| {
+                            const params = fmt[i + 3 .. i + 2 + close];
+                            // Parse width,indent1,indent2
+                            var wrap_width: usize = 0;
+                            var wrap_indent1: usize = 0;
+                            var wrap_indent2: usize = 0;
+                            var pit = std.mem.splitScalar(u8, params, ',');
+                            if (pit.next()) |w| {
+                                wrap_width = std.fmt.parseInt(usize, std.mem.trim(u8, w, " "), 10) catch 0;
+                            }
+                            if (pit.next()) |ind1| {
+                                wrap_indent1 = std.fmt.parseInt(usize, std.mem.trim(u8, ind1, " "), 10) catch 0;
+                            }
+                            if (pit.next()) |ind2| {
+                                wrap_indent2 = std.fmt.parseInt(usize, std.mem.trim(u8, ind2, " "), 10) catch 0;
+                            }
                             i += 3 + close;
+                            // Collect the rest of the formatted text (after %w()) and wrap it
+                            const rest_formatted = formatCommitLine(allocator, fmt[i..], hash, data) catch "";
+                            defer if (rest_formatted.len > 0) allocator.free(rest_formatted);
+                            if (wrap_width > 0 and rest_formatted.len > 0) {
+                                const wrapped = wrapText(allocator, rest_formatted, wrap_width, wrap_indent1, wrap_indent2) catch rest_formatted;
+                                defer if (wrapped.ptr != rest_formatted.ptr) allocator.free(wrapped);
+                                try result.appendSlice(wrapped);
+                            } else {
+                                try result.appendSlice(rest_formatted);
+                            }
+                            return result.toOwnedSlice();
                         } else {
                             i += 2;
                         }
