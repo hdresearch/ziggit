@@ -315,6 +315,32 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             seen_dashdash = true;
             while (args.next()) |farg| try commit_files.append(farg);
             break;
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--template")) {
+            // Template file — read it as the initial message (like -F but as template)
+            const template_path = args.next() orelse {
+                try platform_impl.writeStderr("error: option '-t' requires a value\n");
+                std.process.exit(129);
+            };
+            if (message == null and message_parts.items.len == 0) {
+                message = platform_impl.fs.readFile(allocator, template_path) catch {
+                    const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{template_path});
+                    defer allocator.free(err_msg);
+                    try platform_impl.writeStderr(err_msg);
+                    std.process.exit(128);
+                };
+            }
+        } else if (std.mem.startsWith(u8, arg, "--template=")) {
+            const template_path = arg["--template=".len..];
+            if (message == null and message_parts.items.len == 0) {
+                message = platform_impl.fs.readFile(allocator, template_path) catch {
+                    const err_msg = try std.fmt.allocPrint(allocator, "fatal: could not read file '{s}'\n", .{template_path});
+                    defer allocator.free(err_msg);
+                    try platform_impl.writeStderr(err_msg);
+                    std.process.exit(128);
+                };
+            }
+        } else if (std.mem.eql(u8, arg, "--no-status") or std.mem.eql(u8, arg, "--status")) {
+            // Accept as no-op (affects editor display)
         } else if (arg.len > 0 and arg[0] != '-') {
             // Positional argument - could be a file path
             try commit_files.append(arg);
