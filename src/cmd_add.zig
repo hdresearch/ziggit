@@ -890,7 +890,7 @@ pub fn addDirectoryRecursivelyEx(allocator: std.mem.Allocator, repo_root: []cons
         
         switch (entry.kind) {
             .file => {
-                addSingleFile(allocator, entry_relative_path, entry_full_path, index, git_path, platform_impl, repo_root) catch continue;
+                addSingleFileEx(allocator, entry_relative_path, entry_full_path, index, git_path, platform_impl, repo_root, force, false) catch continue;
             },
             .sym_link => {
                 // helpers.Add symlink - index.add handles symlinks natively
