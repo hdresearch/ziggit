@@ -1654,10 +1654,11 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
             var squash_buf = std.array_list.Managed(u8).init(allocator);
             defer squash_buf.deinit();
             squash_buf.appendSlice("Squashed commit of the following:\n\n") catch {};
-            // Match git log behavior: walk from last target only
-            if (opts.targets.items.len > 0) {
-                const last_target = opts.targets.items[opts.targets.items.len - 1];
-                buildSquashMsgInto(&squash_buf, git_path, current_hash, last_target, allocator, platform_impl);
+            // Walk all targets matching git log --no-merges ^HEAD targets...
+            if (opts.targets.items.len > 1) {
+                buildSquashMsgMultiple(&squash_buf, git_path, current_hash, opts.targets.items, allocator, platform_impl);
+            } else if (opts.targets.items.len > 0) {
+                buildSquashMsgInto(&squash_buf, git_path, current_hash, opts.targets.items[0], allocator, platform_impl);
             }
 
             const squash_path = std.fmt.allocPrint(allocator, "{s}/SQUASH_MSG", .{git_path}) catch {
