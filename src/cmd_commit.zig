@@ -52,6 +52,8 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
     }
 
     var message: ?[]const u8 = null;
+    var message_parts = std.array_list.Managed([]const u8).init(allocator);
+    defer message_parts.deinit();
     var allow_empty = false;
     var amend = false;
     var add_all = false;
@@ -72,28 +74,32 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 std.process.exit(128);
             }
             msg_source = .m_flag;
-            message = args.next() orelse {
+            const m_val = args.next() orelse {
                 try platform_impl.writeStderr("error: option `-m' requires a value\n");
                 std.process.exit(129);
             };
+            try message_parts.append(m_val);
         } else if (std.mem.startsWith(u8, arg, "-m")) {
             if (msg_source == .f_flag or msg_source == .c_flag) {
                 try platform_impl.writeStderr("fatal: Option -m cannot be combined with -F or -C/-c\n");
                 std.process.exit(128);
             }
             msg_source = .m_flag;
-            message = arg[2..];
+            try message_parts.append(arg[2..]);
         } else if (std.mem.eql(u8, arg, "-a")) {
             add_all = true;
         } else if (std.mem.eql(u8, arg, "-am") or std.mem.eql(u8, arg, "-ma")) {
             add_all = true;
-            message = args.next() orelse {
+            msg_source = .m_flag;
+            const m_val = args.next() orelse {
                 try platform_impl.writeStderr("error: option `-am' requires a message\n");
                 std.process.exit(129);
             };
+            try message_parts.append(m_val);
         } else if (std.mem.startsWith(u8, arg, "-am")) {
             add_all = true;
-            message = arg[3..];
+            msg_source = .m_flag;
+            try message_parts.append(arg[3..]);
         } else if (std.mem.eql(u8, arg, "--allow-empty")) {
             allow_empty = true;
         } else if (std.mem.eql(u8, arg, "--amend")) {
@@ -203,6 +209,31 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         } else if (arg.len > 0 and arg[0] != '-') {
             // Positional argument - could be a file path
             try commit_files.append(arg);
+        }
+    }
+
+    // Combine multiple -m messages with blank line separators (git behavior)
+    if (message_parts.items.len > 0) {
+        if (message_parts.items.len == 1) {
+            message = message_parts.items[0];
+        } else {
+            var total_len: usize = 0;
+            for (message_parts.items, 0..) |part, idx| {
+                total_len += part.len;
+                if (idx < message_parts.items.len - 1) total_len += 2; // "\n\n"
+            }
+            var buf = try allocator.alloc(u8, total_len);
+            var pos: usize = 0;
+            for (message_parts.items, 0..) |part, idx| {
+                @memcpy(buf[pos .. pos + part.len], part);
+                pos += part.len;
+                if (idx < message_parts.items.len - 1) {
+                    buf[pos] = '\n';
+                    buf[pos + 1] = '\n';
+                    pos += 2;
+                }
+            }
+            message = buf;
         }
     }
 
