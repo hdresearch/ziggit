@@ -41,6 +41,7 @@ const cmd_hash_object = @import("cmd_hash_object.zig");
 const cmd_init = @import("cmd_init.zig");
 const cmd_last_modified = @import("cmd_last_modified.zig");
 const cmd_log = @import("cmd_log.zig");
+const cmd_shortlog = @import("cmd_shortlog.zig");
 const cmd_ls_files = @import("cmd_ls_files.zig");
 const cmd_ls_remote = @import("cmd_ls_remote.zig");
 const cmd_ls_tree = @import("cmd_ls_tree.zig");
@@ -898,6 +899,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_tag.cmdTag(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "show")) {
         try diff_cmd_mod.cmdShow(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "shortlog")) {
+        try cmd_shortlog.cmdShortlog(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "cat-file")) {
         try cmd_cat_file.cmdCatFile(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "remote")) {

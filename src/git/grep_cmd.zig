@@ -185,7 +185,11 @@ const MatchResult = struct {
     match_end: ?usize = null,
 };
 
-pub fn cmdGrep(allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+pub fn cmdGrep(passed_allocator: Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
+    const allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
+        std.heap.c_allocator
+    else
+        passed_allocator;
     var opts = GrepOptions.init(allocator);
     defer opts.deinit();
 
