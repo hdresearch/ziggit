@@ -158,6 +158,38 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     else
         "";
 
+    // Check status.short and status.branch config (only if not overridden by command line)
+    {
+        const config_path_sb = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+        defer allocator.free(config_path_sb);
+        if (platform_impl.fs.readFile(allocator, config_path_sb)) |cfg| {
+            defer allocator.free(cfg);
+            if (!short_format and !porcelain) {
+                // Check status.short config
+                const short_val = if (helpers.getConfigOverride("status.short")) |v| v else
+                    (helpers.parseConfigValue(cfg, "status.short", allocator) catch null) orelse null;
+                if (short_val) |val| {
+                    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                        short_format = true;
+                        porcelain = true;
+                    }
+                    if (!std.mem.eql(u8, val, "true") and !std.mem.eql(u8, val, "yes") and !std.mem.eql(u8, val, "1"))
+                    {} else {}
+                }
+            }
+            if (!show_branch) {
+                // Check status.branch config
+                const branch_val = if (helpers.getConfigOverride("status.branch")) |v| v else
+                    (helpers.parseConfigValue(cfg, "status.branch", allocator) catch null) orelse null;
+                if (branch_val) |val| {
+                    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                        show_branch = true;
+                    }
+                }
+            }
+        } else |_| {}
+    }
+
     // helpers.Check config for status.showUntrackedFiles (if not overridden by command line)
     if (!untracked_explicit) {
         const config_path_for_ut = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
@@ -507,9 +539,13 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                     false;
                 
                 if (is_new) {
-                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "A  {s}", .{entry.path}));
+                    const qp = try quotePath(allocator, entry.path);
+                    defer allocator.free(qp);
+                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "A  {s}", .{qp}));
                 } else {
-                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "M  {s}", .{entry.path}));
+                    const qp = try quotePath(allocator, entry.path);
+                    defer allocator.free(qp);
+                    try porcelain_lines.append(try std.fmt.allocPrint(allocator, "M  {s}", .{qp}));
                 }
             }
         } else {
@@ -549,7 +585,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     if (modified_files.items.len > 0) {
         if (porcelain) {
             for (modified_files.items) |entry| {
-                try porcelain_lines.append(try std.fmt.allocPrint(allocator, " M {s}", .{entry.path}));
+                const qp = try quotePath(allocator, entry.path);
+                defer allocator.free(qp);
+                try porcelain_lines.append(try std.fmt.allocPrint(allocator, " M {s}", .{qp}));
             }
         } else {
             try platform_impl.writeStdout("\nChanges not staged for commit:\n");
@@ -570,7 +608,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     if (deleted_files.items.len > 0) {
         if (porcelain) {
             for (deleted_files.items) |entry| {
-                try porcelain_lines.append(try std.fmt.allocPrint(allocator, " D {s}", .{entry.path}));
+                const qp = try quotePath(allocator, entry.path);
+                defer allocator.free(qp);
+                try porcelain_lines.append(try std.fmt.allocPrint(allocator, " D {s}", .{qp}));
             }
         } else {
             if (modified_files.items.len == 0) {
@@ -669,7 +709,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     if (untracked_files.items.len > 0) {
         if (porcelain) {
             for (untracked_files.items) |file| {
-                try porcelain_lines.append(try std.fmt.allocPrint(allocator, "?? {s}", .{file}));
+                const qp = try quotePath(allocator, file);
+                defer allocator.free(qp);
+                try porcelain_lines.append(try std.fmt.allocPrint(allocator, "?? {s}", .{qp}));
             }
         } else {
             try platform_impl.writeStdout("\nUntracked files:\n");
@@ -690,12 +732,16 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     if (porcelain and porcelain_lines.items.len > 0) {
         // Sort: tracked entries in path order first, then untracked in path order
         std.mem.sort([]u8, porcelain_lines.items, {}, struct {
+            fn stripQuote(s: []const u8) []const u8 {
+                if (s.len > 0 and s[0] == '"') return s[1..];
+                return s;
+            }
             fn lessThan(_: void, a: []u8, b: []u8) bool {
                 const a_untracked = a.len >= 2 and a[0] == '?' and a[1] == '?';
                 const b_untracked = b.len >= 2 and b[0] == '?' and b[1] == '?';
                 if (a_untracked != b_untracked) return !a_untracked; // tracked before untracked
-                const a_path = if (a.len > 3) a[3..] else a;
-                const b_path = if (b.len > 3) b[3..] else b;
+                const a_path = stripQuote(if (a.len > 3) a[3..] else a);
+                const b_path = stripQuote(if (b.len > 3) b[3..] else b);
                 return std.mem.order(u8, a_path, b_path) == .lt;
             }
         }.lessThan);
@@ -738,6 +784,36 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
         }
     }
+}
+
+/// Quote a path for porcelain output if it contains special characters
+fn quotePath(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    var needs_quote = false;
+    for (path) |c| {
+        if (c == ' ' or c == '"' or c == '\\' or c == '\t' or c < 0x20 or c >= 0x7f) {
+            needs_quote = true;
+            break;
+        }
+    }
+    if (!needs_quote) return try alloc.dupe(u8, path);
+    
+    var result = std.array_list.Managed(u8).init(alloc);
+    errdefer result.deinit();
+    try result.append('"');
+    for (path) |c| {
+        if (c == '"' or c == '\\') {
+            try result.append('\\');
+            try result.append(c);
+        } else if (c == '\t') {
+            try result.appendSlice("\\t");
+        } else if (c == '\n') {
+            try result.appendSlice("\\n");
+        } else {
+            try result.append(c);
+        }
+    }
+    try result.append('"');
+    return try result.toOwnedSlice();
 }
 
 /// Given a file path relative to repo root and the cwd prefix (also relative to repo root),
