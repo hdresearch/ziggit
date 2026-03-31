@@ -2441,14 +2441,7 @@ pub const Repository = struct {
 
     /// Look up a SHA-1 hash in already-loaded idx data and return the pack offset.
     fn lookupIdxForOffsetFromData(idx_data: []const u8, target_hash: *const [20]u8) ObjectReadError!u64 {
-
-        // Validate v2 idx header
-        if (idx_data.len < 1028) return error.InvalidIdx;
-        if (!std.mem.eql(u8, idx_data[0..4], "\xfftOc")) return error.InvalidIdx;
-        const version = std.mem.readInt(u32, idx_data[4..8], .big);
-        if (version != 2) return error.InvalidIdx;
-
-        // Fanout table at offset 8, 256 entries of 4 bytes each
+        // Fanout table at offset 8 (skip validation, idx is validated on cache load)
         const fanout_offset: usize = 8;
         const first_byte = target_hash[0];
         const total_objects = std.mem.readInt(u32, idx_data[fanout_offset + 255 * 4 ..][0..4], .big);

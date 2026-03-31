@@ -268,6 +268,36 @@ pub fn cSkipZlib(input: []const u8) ?usize {
     }
 }
 
+/// Decompress directly into a caller-provided buffer using C zlib inflate.
+/// Returns consumed input bytes and decompressed output bytes.
+/// No allocation needed — ideal for decompressIntoBuf.
+pub fn cInflateIntoBuf(input: []const u8, output: []u8) ?struct { consumed: usize, produced: usize } {
+    initCZlib();
+    const init_fn = zlib_inflate_init2_fn orelse return null;
+    const inflate_fn = zlib_inflate_fn orelse return null;
+    const end_fn = zlib_inflate_end_fn orelse return null;
+
+    var stream: ZStream = std.mem.zeroes(ZStream);
+    if (init_fn(&stream, 15, "1.2.13", @sizeOf(ZStream)) != 0) return null;
+
+    stream.next_in = input.ptr;
+    stream.avail_in = @intCast(@min(input.len, std.math.maxInt(c_uint)));
+    stream.next_out = output.ptr;
+    stream.avail_out = @intCast(@min(output.len, std.math.maxInt(c_uint)));
+
+    const Z_FINISH = 4;
+    const Z_STREAM_END = 1;
+    const ret = inflate_fn(&stream, Z_FINISH);
+    const consumed = @as(usize, @intCast(stream.total_in));
+    const produced = @as(usize, @intCast(stream.total_out));
+    _ = end_fn(&stream);
+
+    if (ret == Z_STREAM_END) {
+        return .{ .consumed = consumed, .produced = produced };
+    }
+    return null;
+}
+
 /// Compress data using C zlib (more reliable than Zig flate)
 pub fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     initCZlib();
