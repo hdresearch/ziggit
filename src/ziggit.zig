@@ -51,6 +51,8 @@ pub const Repository = struct {
     _cached_packed_refs: ?[]const u8 = null,
     // PACK-ONLY FLAG: When true, skip loose object lookups (all objects are in packs)
     _pack_only: bool = false,
+    // Pre-allocated scratch memory for delta resolution (avoids mmap/munmap per object)
+    _scratch_mem: ?[]u8 = null,
 
     /// Open an existing repository at the specified path
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
@@ -86,12 +88,11 @@ pub const Repository = struct {
         } else |_| {}
         
         // OPTIMIZATION: Pre-warm critical caches during repository opening
-        // This eliminates cold cache penalties for the first API calls
-        // Skip warmup for benchmarking (controlled by environment variable)
-        if (std.process.getEnvVarOwned(allocator, "ZIGGIT_SKIP_WARMUP")) |skip_warmup| {
-            allocator.free(skip_warmup);
-        } else |_| {
-            repo.warmupCaches() catch {}; // Ignore errors, caching is best-effort
+        // Skip warmup if ZIGGIT_SKIP_WARMUP is set (for benchmarking)
+        if (comptime @import("builtin").os.tag != .freestanding and @import("builtin").os.tag != .wasi) {
+            if (std.posix.getenv("ZIGGIT_SKIP_WARMUP") == null) {
+                repo.warmupCaches() catch {};
+            }
         }
         
         return repo;
@@ -143,6 +144,7 @@ pub const Repository = struct {
         }
         if (self._cached_pack_path) |p| self.allocator.free(p);
         if (self._cached_packed_refs) |pr| self.allocator.free(pr);
+        if (self._scratch_mem) |sm| std.heap.page_allocator.free(sm);
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
     }
@@ -158,15 +160,10 @@ pub const Repository = struct {
     /// OPTIMIZATION: Pre-warm critical caches to eliminate cold cache penalties
     /// This should be called immediately after repository opening
     fn warmupCaches(self: *Repository) !void {
-        // Pre-warm HEAD hash cache (very fast, 2 file reads)
+        // Pre-warm HEAD hash cache (2 file reads: HEAD + ref)
         _ = self.revParseHead() catch {};
-        
-        // Pre-warm index metadata cache for status operations
-        self.warmupIndexMetadata() catch {};
-        
-        // Skip describeTags warmup — it's expensive (directory scan + pack reads)
-        // and not needed for the common checkout/findCommit paths.
-        // Tags will be cached lazily on first access.
+        // Skip index metadata warmup and tags — they're not needed for
+        // the common findCommit/checkout paths and will be cached lazily.
     }
     
     /// Pre-warm index file metadata to speed up first status check
@@ -1241,7 +1238,14 @@ pub const Repository = struct {
             return;
         }
         
-        // 2. Recursively checkout tree to working directory AND build index in one pass
+        // 2. Use arena allocator for checkout to batch alloc/free (reduces mmap/munmap syscalls)
+        var arena = std.heap.ArenaAllocator.init(std.heap.raw_c_allocator);
+        defer arena.deinit();
+        const saved_fast_alloc = self._fast_alloc;
+        self._fast_alloc = arena.allocator();
+        defer self._fast_alloc = saved_fast_alloc;
+
+        // Recursively checkout tree to working directory AND build index in one pass
         var git_index = index_parser.GitIndex.init(self.allocator);
         errdefer git_index.deinit();
         try self.checkoutTreeAndIndex(&tree_hash, self.path, "", &git_index);
