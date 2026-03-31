@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const hooks = @import("git/hooks.zig");
 
 const objects = helpers.objects;
 const index_mod = helpers.index_mod;
@@ -1854,6 +1855,15 @@ fn stashApply(
         const msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{head_branch});
         defer allocator.free(msg);
         try platform_impl.writeStdout(msg);
+    }
+
+    // Run post-checkout hook after stash apply/pop restores working tree
+    {
+        const prev_head = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+        defer if (prev_head) |h| allocator.free(h);
+        const head_hash = prev_head orelse ZERO_HASH;
+        const hook_args = [_][]const u8{ head_hash, head_hash, "1" };
+        _ = hooks.runHook(allocator, git_path, "post-checkout", &hook_args, null, platform_impl) catch {};
     }
 }
 
