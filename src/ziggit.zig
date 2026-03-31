@@ -2677,53 +2677,34 @@ pub const Repository = struct {
         }
 
         // Apply delta instructions — use c_allocator for temp buffer
+        // Pre-allocate exact result size and use zero-alloc delta application
         const fa = self._fast_alloc;
-        var result_content = std.array_list.Managed(u8).init(fa);
-        errdefer result_content.deinit();
+        const rs = @as(usize, @intCast(result_size));
+        var result_buf = fa.alloc(u8, rs) catch return error.CorruptObject;
+        errdefer fa.free(result_buf);
 
-        while (dpos < delta.len) {
-            const cmd = delta[dpos];
-            dpos += 1;
-
-            if (cmd & 0x80 != 0) {
-                // Copy from base
-                var copy_offset: u64 = 0;
-                var copy_size: u64 = 0;
-
-                if (cmd & 0x01 != 0) { copy_offset |= @as(u64, delta[dpos]); dpos += 1; }
-                if (cmd & 0x02 != 0) { copy_offset |= @as(u64, delta[dpos]) << 8; dpos += 1; }
-                if (cmd & 0x04 != 0) { copy_offset |= @as(u64, delta[dpos]) << 16; dpos += 1; }
-                if (cmd & 0x08 != 0) { copy_offset |= @as(u64, delta[dpos]) << 24; dpos += 1; }
-
-                if (cmd & 0x10 != 0) { copy_size |= @as(u64, delta[dpos]); dpos += 1; }
-                if (cmd & 0x20 != 0) { copy_size |= @as(u64, delta[dpos]) << 8; dpos += 1; }
-                if (cmd & 0x40 != 0) { copy_size |= @as(u64, delta[dpos]) << 16; dpos += 1; }
-
-                if (copy_size == 0) copy_size = 0x10000;
-
-                const co = @as(usize, @intCast(copy_offset));
-                const cs = @as(usize, @intCast(copy_size));
-                if (co + cs > base_content.len) return error.CorruptObject;
-                try result_content.appendSlice(base_content[co .. co + cs]);
-            } else if (cmd != 0) {
-                // Insert from delta
-                const insert_size = @as(usize, cmd);
-                if (dpos + insert_size > delta.len) return error.CorruptObject;
-                try result_content.appendSlice(delta[dpos .. dpos + insert_size]);
-                dpos += insert_size;
-            } else {
-                return error.CorruptObject; // cmd == 0 is reserved
-            }
-        }
+        // Use the fast zero-alloc delta application from objects module
+        const written = objects_mod.applyDeltaInto(base_content, delta, result_buf) catch {
+            // Fallback to permissive delta application
+            fa.free(result_buf);
+            const result_data = objects_mod.applyDelta(base_content, delta, fa) catch return error.CorruptObject;
+            defer fa.free(result_data);
+            var new_hdr_buf: [64]u8 = undefined;
+            const new_header = std.fmt.bufPrint(&new_hdr_buf, "{s} {}\x00", .{ type_name, result_data.len }) catch return error.CorruptObject;
+            var full_result = fa.alloc(u8, new_header.len + result_data.len) catch return error.CorruptObject;
+            @memcpy(full_result[0..new_header.len], new_header);
+            @memcpy(full_result[new_header.len..], result_data);
+            return full_result;
+        };
 
         // Build result with header using stack buffer
         var new_hdr_buf: [64]u8 = undefined;
-        const new_header = std.fmt.bufPrint(&new_hdr_buf, "{s} {}\x00", .{ type_name, result_content.items.len }) catch return error.CorruptObject;
+        const new_header = std.fmt.bufPrint(&new_hdr_buf, "{s} {}\x00", .{ type_name, written }) catch return error.CorruptObject;
 
-        var full_result = try fa.alloc(u8, new_header.len + result_content.items.len);
+        var full_result = fa.alloc(u8, new_header.len + written) catch return error.CorruptObject;
         @memcpy(full_result[0..new_header.len], new_header);
-        @memcpy(full_result[new_header.len..], result_content.items);
-        result_content.deinit();
+        @memcpy(full_result[new_header.len..], result_buf[0..written]);
+        fa.free(result_buf);
 
         return full_result;
     }
