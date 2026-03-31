@@ -5273,8 +5273,8 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
                 }
             }
 
-            // Add parents only when walking a range (have exclude refs)
-            if (exclude_hashes.items.len > 0) {
+            // Add parents when walking a range or using -N
+            if (exclude_hashes.items.len > 0 or (lo.max_count != null and lo.max_count.? > 1)) {
                 var slines = std.mem.splitSequence(u8, sobj.data, "\n");
                 while (slines.next()) |sline| {
                     if (sline.len == 0) break;
@@ -5316,6 +5316,7 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
 
     // Show mode: just show the specified commits (don't walk history for non-show)
     if (show_mode) {
+        try pi.writeStderr("SHOW-MODE-ENTERED\n");
         // Handle -N by walking parents from the first start hash
         if (lo.max_count != null and lo.max_count.? > 1 and start_hashes.items.len == 1) {
             var cur_h = try allocator.dupe(u8, start_hashes.items[0]);

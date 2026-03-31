@@ -118,6 +118,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             if (args.next()) |count_str| {
                 max_count = std.fmt.parseInt(u32, count_str, 10) catch null;
             }
+        } else if (std.mem.startsWith(u8, arg, "-n") and arg.len > 2 and std.ascii.isDigit(arg[2])) {
+            max_count = std.fmt.parseInt(u32, arg[2..], 10) catch null;
+        } else if (std.mem.startsWith(u8, arg, "--max-count=")) {
+            max_count = std.fmt.parseInt(u32, arg["--max-count=".len..], 10) catch null;
         } else if (std.mem.startsWith(u8, arg, "--author=")) {
             try author_filters.append(arg["--author=".len..]);
         } else if (std.mem.eql(u8, arg, "--author")) {
@@ -197,6 +201,8 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             ignore_missing = true;
         } else if (std.mem.eql(u8, arg, "--exclude-promisor-objects")) {
             // Accept but ignore (no partial clone support)
+        } else if (std.mem.startsWith(u8, arg, "--decorate=") or std.mem.eql(u8, arg, "--decorate") or std.mem.eql(u8, arg, "--no-decorate")) {
+            // Accept decoration flags (decorations are built when format uses %d/%D)
         } else if (std.mem.startsWith(u8, arg, "--decorate-refs=")) {
             try decorate_refs_include.append(arg["--decorate-refs=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--decorate-refs-exclude=")) {
