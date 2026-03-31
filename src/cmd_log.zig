@@ -957,10 +957,96 @@ fn matchesFilter(text: []const u8, pattern: []const u8, fixed: bool) bool {
         }
     }
     if (has_regex) {
-        // Special case: " * " pattern (used in test) - treat as literal since -F flag should be used
-        // For now, just do substring match ignoring regex
-        // Try substring match of the literal pattern
-        return std.mem.indexOf(u8, text, pattern) != null;
+        // Simple regex matching for common patterns
+        return simpleRegexMatch(text, pattern);
     }
     return std.mem.indexOf(u8, text, pattern) != null;
+}
+
+/// Simple regex matching supporting: . * + ? [] and literal chars
+/// Matches if pattern occurs anywhere in text (like grep)
+fn simpleRegexMatch(text: []const u8, pattern: []const u8) bool {
+    // Try matching at each position in each line
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var i: usize = 0;
+        while (i <= line.len) : (i += 1) {
+            if (regexMatchAt(line, i, pattern, 0)) return true;
+        }
+    }
+    return false;
+}
+
+fn regexMatchAt(text: []const u8, text_pos: usize, pattern: []const u8, pat_pos: usize) bool {
+    var tp = text_pos;
+    var pp = pat_pos;
+    while (pp < pattern.len) {
+        // Check for character class [...]
+        if (pattern[pp] == '[') {
+            if (tp >= text.len) return false;
+            const close = std.mem.indexOfScalarPos(u8, pattern, pp + 1, ']') orelse return false;
+            const negated = pp + 1 < close and pattern[pp + 1] == '^';
+            const class_start = if (negated) pp + 2 else pp + 1;
+            const class_chars = pattern[class_start..close];
+            var matched = false;
+            for (class_chars) |c| {
+                if (text[tp] == c) { matched = true; break; }
+            }
+            if (negated) matched = !matched;
+            if (!matched) return false;
+            tp += 1;
+            pp = close + 1;
+        } else if (pattern[pp] == '.') {
+            if (tp >= text.len) return false;
+            tp += 1;
+            pp += 1;
+        } else if (pattern[pp] == '\\' and pp + 1 < pattern.len) {
+            // Escaped character
+            if (tp >= text.len or text[tp] != pattern[pp + 1]) return false;
+            tp += 1;
+            pp += 2;
+        } else if (pp + 1 < pattern.len and pattern[pp + 1] == '*') {
+            // X* - match zero or more of X
+            const ch = pattern[pp];
+            pp += 2;
+            // Try matching rest with 0..n occurrences of ch
+            var count: usize = 0;
+            while (true) {
+                if (regexMatchAt(text, tp + count, pattern, pp)) return true;
+                if (tp + count >= text.len) break;
+                if (ch == '.' or text[tp + count] == ch) {
+                    count += 1;
+                } else break;
+            }
+            return false;
+        } else if (pp + 1 < pattern.len and pattern[pp + 1] == '+') {
+            // X+ - match one or more of X
+            const ch = pattern[pp];
+            if (tp >= text.len) return false;
+            if (ch != '.' and text[tp] != ch) return false;
+            tp += 1;
+            pp += 2;
+            // Now match zero or more
+            while (tp < text.len and (ch == '.' or text[tp] == ch)) {
+                if (regexMatchAt(text, tp, pattern, pp)) return true;
+                tp += 1;
+            }
+            return regexMatchAt(text, tp, pattern, pp);
+        } else if (pp + 1 < pattern.len and pattern[pp + 1] == '?') {
+            // X? - match zero or one of X
+            const ch = pattern[pp];
+            pp += 2;
+            if (regexMatchAt(text, tp, pattern, pp)) return true;
+            if (tp < text.len and (ch == '.' or text[tp] == ch)) {
+                return regexMatchAt(text, tp + 1, pattern, pp);
+            }
+            return false;
+        } else {
+            // Literal character
+            if (tp >= text.len or text[tp] != pattern[pp]) return false;
+            tp += 1;
+            pp += 1;
+        }
+    }
+    return true; // Pattern exhausted, match succeeded
 }
