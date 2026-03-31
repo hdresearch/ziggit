@@ -908,17 +908,25 @@ pub const Repository = struct {
             return result;
         }
 
-        const ref_path = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{committish});
-        defer self.allocator.free(ref_path);
-        if (self.resolveRef(ref_path)) |hash| {
-            return hash;
-        } else |_| {}
+        // Use stack buffers to avoid heap allocation for ref path construction
+        var ref_buf: [256]u8 = undefined;
+        if (committish.len <= 256 - "refs/heads/".len) {
+            const ref_path = std.fmt.bufPrint(&ref_buf, "refs/heads/{s}", .{committish}) catch unreachable;
+            if (self.resolveRef(ref_path)) |hash| return hash else |_| {}
+        } else {
+            const ref_path = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{committish});
+            defer self.allocator.free(ref_path);
+            if (self.resolveRef(ref_path)) |hash| return hash else |_| {}
+        }
 
-        const tag_path = try std.fmt.allocPrint(self.allocator, "refs/tags/{s}", .{committish});
-        defer self.allocator.free(tag_path);
-        if (self.resolveRef(tag_path)) |hash| {
-            return hash;
-        } else |_| {}
+        if (committish.len <= 256 - "refs/tags/".len) {
+            const tag_path = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{committish}) catch unreachable;
+            if (self.resolveRef(tag_path)) |hash| return hash else |_| {}
+        } else {
+            const tag_path = try std.fmt.allocPrint(self.allocator, "refs/tags/{s}", .{committish});
+            defer self.allocator.free(tag_path);
+            if (self.resolveRef(tag_path)) |hash| return hash else |_| {}
+        }
 
         if (committish.len >= 4 and committish.len <= 40 and isValidHex(committish)) {
             return try self.expandShortHash(committish);
