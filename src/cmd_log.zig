@@ -34,6 +34,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         passed_allocator;
 
     var oneline = false;
+    var show_graph = false;
     var format_string: ?[]const u8 = null;
 
     var format_is_separator = false; // true for "format:", false for "tformat:" / "--format="
@@ -129,6 +130,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             grep_reflog = true;
         } else if (std.mem.eql(u8, arg, "--invert-grep")) {
             invert_grep = true;
+        } else if (std.mem.eql(u8, arg, "--graph")) {
+            show_graph = true;
+        } else if (std.mem.eql(u8, arg, "--no-graph")) {
+            show_graph = false;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
             output_encoding = arg["--encoding=".len..];
         } else if (std.mem.startsWith(u8, arg, "--diff-filter=") or std.mem.startsWith(u8, arg, "--diff-algorithm=") or std.mem.startsWith(u8, arg, "--inter-hunk-context=") or std.mem.startsWith(u8, arg, "--src-prefix=") or std.mem.startsWith(u8, arg, "--dst-prefix=") or std.mem.startsWith(u8, arg, "--stat=") or std.mem.startsWith(u8, arg, "--line-prefix=")) {
@@ -348,7 +353,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     
     // Try commit-graph fast path for common cases (oneline, no filters, no excludes)
     const has_filters = author_filters.items.len > 0 or committer_filters.items.len > 0 or grep_filters.items.len > 0;
-    if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null) {
+    if (oneline and !has_filters and exclude_refs.items.len == 0 and include_refs.items.len == 0 and format_string == null and output_encoding == null and !show_graph) {
         if (commit_graph_mod.CommitGraph.open(git_path, allocator)) |cg| {
             // Preload commits for faster cache hits during traversal
             // Only preload for full log or large counts (preloading ALL commits is wasteful for -20)
@@ -777,6 +782,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             if (format_is_separator and count > 0) {
                 try platform_impl.writeStdout("\n");
             }
+            if (show_graph) try platform_impl.writeStdout("* ");
             try helpers.outputFormattedCommit(fmt, cur_hash, allocator, platform_impl);
             if (!format_is_separator) {
                 try platform_impl.writeStdout("\n");
@@ -790,12 +796,14 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             };
             // Use output buffer to avoid allocPrint
             output_buf.clearRetainingCapacity();
+            if (show_graph) try output_buf.appendSlice("* ");
             try output_buf.appendSlice(short_hash);
             try output_buf.append(' ');
             try output_buf.appendSlice(first_line);
             try output_buf.append('\n');
             try platform_impl.writeStdout(output_buf.items);
         } else {
+            if (show_graph) try platform_impl.writeStdout("* ");
             const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{cur_hash});
             defer allocator.free(commit_header);
             try platform_impl.writeStdout(commit_header);
@@ -1034,6 +1042,17 @@ fn regexMatchAt(text: []const u8, text_pos: usize, pattern: []const u8, pat_pos:
     var tp = text_pos;
     var pp = pat_pos;
     while (pp < pattern.len) {
+        // Skip grouping parentheses (we don't capture but allow matching through them)
+        if (pattern[pp] == '(' or pattern[pp] == ')') {
+            pp += 1;
+            continue;
+        }
+        // Handle alternation | - try both branches
+        if (pattern[pp] == '|') {
+            // Try rest of pattern from current text position
+            if (regexMatchAt(text, tp, pattern, pp + 1)) return true;
+            return false;
+        }
         // Check for character class [...]
         if (pattern[pp] == '[') {
             if (tp >= text.len) return false;
