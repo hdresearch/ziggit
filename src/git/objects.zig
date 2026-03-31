@@ -60,7 +60,20 @@ pub fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hi
     initCZlib();
     const uncompress_fn = zlib_uncompress_fn orelse return null;
     
-    // Use reusable buffer to avoid per-call mmap/munmap
+    // FAST PATH: When size is known exactly, decompress directly into final allocation
+    // This avoids the scratch buffer + memcpy overhead.
+    if (size_hint > 0 and size_hint <= 64 * 1024 * 1024) {
+        const result = allocator.alloc(u8, size_hint) catch return null;
+        var dest_len: c_ulong = @intCast(size_hint);
+        const ret = uncompress_fn(result.ptr, &dest_len, input.ptr, @intCast(input.len));
+        if (ret == 0 and @as(usize, @intCast(dest_len)) == size_hint) {
+            return result;
+        }
+        // Size mismatch or error - free and fall through to scratch path
+        allocator.free(result);
+    }
+    
+    // SLOW PATH: Unknown size - use reusable scratch buffer
     var needed = if (size_hint > 0) size_hint else @max(input.len * 4, 4096);
     var attempts: u8 = 0;
     while (attempts < 10) : (attempts += 1) {

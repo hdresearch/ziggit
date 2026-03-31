@@ -24,6 +24,8 @@ pub const Repository = struct {
     path: []const u8,
     git_dir: []const u8,
     allocator: std.mem.Allocator,
+    /// Fast allocator for internal hot-path operations (uses c_allocator to avoid GPA mmap overhead)
+    _fast_alloc: std.mem.Allocator = std.heap.c_allocator,
     
     // OPTIMIZATION: Cache for ultra-fast status checks
     _cached_index_mtime: ?i128 = null,
@@ -2322,20 +2324,21 @@ pub const Repository = struct {
 
     /// Read and decompress a git object (loose or packed).
     /// Returns the raw decompressed content INCLUDING the header ("type size\0...").
-    /// Caller owns the returned slice and must free it with self.allocator.
+    /// Caller owns the returned slice and must free it with self._fast_alloc.
     fn readRawObject(self: *Repository, hash_hex: *const [40]u8) ObjectReadError![]u8 {
+        const fa = self._fast_alloc;
         // Try loose object first (stack-allocated path)
         var obj_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const obj_path = std.fmt.bufPrint(&obj_path_buf, "{s}/objects/{s}/{s}", .{ self.git_dir, hash_hex[0..2], hash_hex[2..] }) catch return error.ObjectNotFound;
 
         if (std.fs.openFileAbsolute(obj_path, .{})) |obj_file| {
             defer obj_file.close();
-            const compressed = try obj_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
-            defer self.allocator.free(compressed);
+            const compressed = obj_file.readToEndAlloc(fa, 100 * 1024 * 1024) catch return error.ObjectNotFound;
+            defer fa.free(compressed);
 
             // Try C zlib first (faster), fall back to Zig flate
-            return objects_mod.cDecompressSlice(self.allocator, compressed, 0) orelse
-                (zlib_compat.decompressSlice(self.allocator, compressed) catch
+            return objects_mod.cDecompressSlice(fa, compressed, 0) orelse
+                (zlib_compat.decompressSlice(fa, compressed) catch
                 return error.CorruptObject);
         } else |_| {}
 
@@ -2538,16 +2541,17 @@ pub const Repository = struct {
             else => return error.InvalidPackObject,
         };
 
-        // Decompress the object data — try C zlib first (much faster), fall back to Zig flate
-        const decompressed = objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
-            (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
-        defer self.allocator.free(decompressed);
+        // Decompress the object data — use c_allocator for temp buffer (avoids GPA mmap overhead)
+        const fa = self._fast_alloc;
+        const decompressed = objects_mod.cDecompressSlice(fa, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
+            (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
+        defer fa.free(decompressed);
 
         // Build "type size\0content" format using stack buffer for header
         var hdr_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_name, decompressed.len }) catch return error.CorruptObject;
 
-        var result = try self.allocator.alloc(u8, header.len + decompressed.len);
+        var result = try fa.alloc(u8, header.len + decompressed.len);
         @memcpy(result[0..header.len], header);
         @memcpy(result[header.len..], decompressed);
 
@@ -2571,13 +2575,14 @@ pub const Repository = struct {
         const base_offset = current_offset - neg_offset;
 
         // Read base object from the SAME pack data (no re-read from disk!)
+        const fa = self._fast_alloc;
         const base_obj = try self.readPackObjectFromData(pack_data, base_offset);
-        defer self.allocator.free(base_obj);
+        defer fa.free(base_obj);
 
-        // Decompress delta data — try C zlib first (faster)
-        const delta_data = objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], 0) orelse
-            (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
-        defer self.allocator.free(delta_data);
+        // Decompress delta data — use c_allocator for temp buffers
+        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
+            (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
+        defer fa.free(delta_data);
 
         // Apply delta to base
         return self.applyDelta(base_obj, delta_data);
@@ -2594,13 +2599,14 @@ pub const Repository = struct {
         var base_hash_hex: [40]u8 = undefined;
         _ = std.fmt.bufPrint(&base_hash_hex, "{x}", .{base_hash_bytes}) catch return error.InvalidPackObject;
 
+        const fa = self._fast_alloc;
         const base_obj = try self.readRawObject(&base_hash_hex);
-        defer self.allocator.free(base_obj);
+        defer fa.free(base_obj);
 
-        // Decompress delta data — try C zlib first (faster)
-        const delta_data = objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], 0) orelse
-            (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
-        defer self.allocator.free(delta_data);
+        // Decompress delta data — use c_allocator for temp buffers
+        const delta_data = objects_mod.cDecompressSlice(fa, pack_data[pos..], 0) orelse
+            (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
+        defer fa.free(delta_data);
 
         return self.applyDelta(base_obj, delta_data);
     }
@@ -2634,8 +2640,9 @@ pub const Repository = struct {
             if (delta[dpos - 1] & 0x80 == 0) break;
         }
 
-        // Apply delta instructions
-        var result_content = std.array_list.Managed(u8).init(self.allocator);
+        // Apply delta instructions — use c_allocator for temp buffer
+        const fa = self._fast_alloc;
+        var result_content = std.array_list.Managed(u8).init(fa);
         errdefer result_content.deinit();
 
         while (dpos < delta.len) {
@@ -2673,11 +2680,11 @@ pub const Repository = struct {
             }
         }
 
-        // Build result with header
-        const new_header = try std.fmt.allocPrint(self.allocator, "{s} {}\x00", .{ type_name, result_content.items.len });
-        defer self.allocator.free(new_header);
+        // Build result with header using stack buffer
+        var new_hdr_buf: [64]u8 = undefined;
+        const new_header = std.fmt.bufPrint(&new_hdr_buf, "{s} {}\x00", .{ type_name, result_content.items.len }) catch return error.CorruptObject;
 
-        var full_result = try self.allocator.alloc(u8, new_header.len + result_content.items.len);
+        var full_result = try fa.alloc(u8, new_header.len + result_content.items.len);
         @memcpy(full_result[0..new_header.len], new_header);
         @memcpy(full_result[new_header.len..], result_content.items);
         result_content.deinit();
@@ -2687,7 +2694,7 @@ pub const Repository = struct {
 
     fn getCommitTree(self: *Repository, commit_hash: *const [40]u8) ![40]u8 {
         const raw = try self.readRawObject(commit_hash);
-        defer self.allocator.free(raw);
+        defer self._fast_alloc.free(raw);
 
         // Parse commit object - look for "tree <hash>" line after null
         const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidCommitObject;
@@ -2715,17 +2722,18 @@ pub const Repository = struct {
 
     fn checkoutTree(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8) !void {
         // Read tree content directly (skip header round-trip if possible)
+        const fa = self._fast_alloc;
         const tree_content = self.readObjectContentFromPack(tree_hash) catch blk: {
             const raw = try self.readRawObject(tree_hash);
             const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
-                self.allocator.free(raw);
+                fa.free(raw);
                 return error.InvalidTreeObject;
             };
             const content_len = raw.len - null_pos - 1;
             std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
-            break :blk self.allocator.realloc(raw, content_len) catch raw[0..content_len];
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
         };
-        defer self.allocator.free(tree_content);
+        defer fa.free(tree_content);
 
         var pos: usize = 0;
         while (pos < tree_content.len) {
@@ -2774,21 +2782,22 @@ pub const Repository = struct {
     }
 
     fn checkoutBlob(self: *Repository, blob_hash: *const [40]u8, target_path: []const u8, filename: []const u8) !void {
+        const fa = self._fast_alloc;
         // FAST PATH: Read object content directly from pack (skip header round-trip)
         const content = self.readObjectContentFromPack(blob_hash) catch blk: {
-            // Fallback to full readRawObject path
-            const raw = try self.readRawObject(blob_hash);
+            // Fallback to full readRawObject path (readRawObject uses _fast_alloc internally for pack)
+            const raw = self.readRawObject(blob_hash) catch return error.InvalidBlobObject;
             // Parse blob object - skip "blob <size>\0" header
             const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
-                self.allocator.free(raw);
+                fa.free(raw);
                 return error.InvalidBlobObject;
             };
             // Shift content to beginning to avoid double alloc
             const content_len = raw.len - null_pos - 1;
             std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
-            break :blk self.allocator.realloc(raw, content_len) catch raw[0..content_len];
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
         };
-        defer self.allocator.free(content);
+        defer fa.free(content);
 
         // Write file to working directory using stack buffer for path
         var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2842,21 +2851,24 @@ pub const Repository = struct {
         switch (obj_type_raw) {
             1, 2, 3, 4 => {
                 // Regular object - decompress directly, return content only
-                return objects_mod.cDecompressSlice(self.allocator, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
-                    (zlib_compat.decompressSlice(self.allocator, pack_data[pos..]) catch return error.CorruptObject);
+                const fa = self._fast_alloc;
+                return objects_mod.cDecompressSlice(fa, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
+                    (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
             },
             6 => {
                 // OFS_DELTA: delegate to full path (needs header for delta application)
+                const fa = self._fast_alloc;
                 const raw = try self.readOfsDeltaObject(pack_data, pos, obj_size, offset);
-                defer self.allocator.free(raw);
+                defer fa.free(raw);
                 const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
-                return self.allocator.dupe(u8, raw[null_pos + 1 ..]);
+                return fa.dupe(u8, raw[null_pos + 1 ..]);
             },
             7 => {
+                const fa = self._fast_alloc;
                 const raw = try self.readRefDeltaObject(pack_data, pos, obj_size);
-                defer self.allocator.free(raw);
+                defer fa.free(raw);
                 const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.CorruptObject;
-                return self.allocator.dupe(u8, raw[null_pos + 1 ..]);
+                return fa.dupe(u8, raw[null_pos + 1 ..]);
             },
             else => return error.InvalidPackObject,
         }
@@ -2889,7 +2901,7 @@ pub const Repository = struct {
 
     fn addTreeToIndex(self: *Repository, git_index: *index_parser.GitIndex, tree_hash: *const [40]u8, prefix: []const u8) !void {
         const raw = try self.readRawObject(tree_hash);
-        defer self.allocator.free(raw);
+        defer self._fast_alloc.free(raw);
 
         const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidTreeObject;
         const entries_start = null_pos + 1;
