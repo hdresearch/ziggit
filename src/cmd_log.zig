@@ -59,6 +59,8 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var invert_grep = false;
     var ignore_case = false;
     var output_encoding: ?[]const u8 = null;
+    var diff_filter: ?[]const u8 = null;
+    var no_renames = false;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -136,12 +138,18 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             show_graph = false;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
             output_encoding = arg["--encoding=".len..];
-        } else if (std.mem.startsWith(u8, arg, "--diff-filter=") or std.mem.startsWith(u8, arg, "--diff-algorithm=") or std.mem.startsWith(u8, arg, "--inter-hunk-context=") or std.mem.startsWith(u8, arg, "--src-prefix=") or std.mem.startsWith(u8, arg, "--dst-prefix=") or std.mem.startsWith(u8, arg, "--stat=") or std.mem.startsWith(u8, arg, "--line-prefix=")) {
+        } else if (std.mem.startsWith(u8, arg, "--diff-filter=")) {
+            diff_filter = arg["--diff-filter=".len..];
+        } else if (std.mem.eql(u8, arg, "--diff-filter")) {
+            diff_filter = args.next();
+        } else if (std.mem.startsWith(u8, arg, "--diff-algorithm=") or std.mem.startsWith(u8, arg, "--inter-hunk-context=") or std.mem.startsWith(u8, arg, "--src-prefix=") or std.mem.startsWith(u8, arg, "--dst-prefix=") or std.mem.startsWith(u8, arg, "--stat=") or std.mem.startsWith(u8, arg, "--line-prefix=")) {
             // Accept diff-related options with = form
-        } else if (std.mem.eql(u8, arg, "--diff-filter") or std.mem.eql(u8, arg, "--diff-algorithm")) {
+        } else if (std.mem.eql(u8, arg, "--diff-algorithm")) {
             // Accept diff-related options with separate value
             _ = args.next();
-        } else if (std.mem.eql(u8, arg, "--no-renames") or std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
+        } else if (std.mem.eql(u8, arg, "--no-renames")) {
+            no_renames = true;
+        } else if (std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
             // Accept diff-related flags
         } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.startsWith(u8, arg, "--no-walk=")) {
             no_walk = true;
@@ -1258,6 +1266,64 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     }
                 }
                 continue;
+            }
+        }
+
+        // Apply --diff-filter: compare commit tree with parent tree
+        if (diff_filter) |df| {
+            const commit_tree = helpers.extractHeaderField(commit_data, "tree");
+            if (commit_tree.len > 0) {
+                const empty_tree = "4b825dc642cb6eb9a060e54bf899d69f82cf0101";
+                const parent_tree: []const u8 = blk: {
+                    if (parent_hashes.len > 0) {
+                        const parent_obj = objects.GitObject.load(parent_hashes[0], git_path, platform_impl, allocator) catch break :blk empty_tree;
+                        defer parent_obj.deinit(allocator);
+                        const pt = helpers.extractHeaderField(parent_obj.data, "tree");
+                        if (pt.len > 0) {
+                            break :blk allocator.dupe(u8, pt) catch break :blk empty_tree;
+                        }
+                        break :blk empty_tree;
+                    }
+                    break :blk empty_tree;
+                };
+                const parent_tree_owned = !std.mem.eql(u8, parent_tree, empty_tree) or parent_hashes.len == 0;
+                defer if (parent_tree_owned and !std.mem.eql(u8, parent_tree, empty_tree)) allocator.free(@constCast(parent_tree));
+
+                var diff_entries = std.array_list.Managed(helpers.DiffStatEntry).init(allocator);
+                defer diff_entries.deinit();
+                helpers.collectTreeDiffEntries(allocator, parent_tree, commit_tree, "", git_path, &.{}, platform_impl, &diff_entries) catch {};
+
+                var matches_filter = false;
+                for (diff_entries.items) |entry| {
+                    for (df) |fc| {
+                        const matches = switch (fc) {
+                            'A' => entry.is_new,
+                            'D' => entry.is_deleted,
+                            'M' => !entry.is_new and !entry.is_deleted,
+                            'R' => false, // rename detection not yet implemented
+                            'C' => false, // copy detection not yet implemented
+                            else => false,
+                        };
+                        if (matches) {
+                            matches_filter = true;
+                            break;
+                        }
+                    }
+                    if (matches_filter) break;
+                }
+                if (!matches_filter) {
+                    // Still walk parents
+                    if (!no_walk) {
+                        for (parent_hashes) |parent| {
+                            if (!visited.contains(parent)) {
+                                try visited.put(try allocator.dupe(u8, parent), {});
+                                const pts = getTs.get(parent, maybe_cg, git_path, platform_impl, allocator);
+                                try queue.append(.{ .hash = try allocator.dupe(u8, parent), .timestamp = pts });
+                            }
+                        }
+                    }
+                    continue;
+                }
             }
         }
 

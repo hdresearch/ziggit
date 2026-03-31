@@ -1512,6 +1512,33 @@ pub fn outputFormattedCommitFromData(format: []const u8, commit_hash: []const u8
                 const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch 0;
                 try out.append(byte_val);
                 i += 4;
+            } else if (c == 'w' and i + 2 < format.len and format[i + 2] == '(') {
+                // %w(width,indent1,indent2) - wrap text
+                if (std.mem.indexOfScalarPos(u8, format, i + 3, ')')) |close_pos| {
+                    const params = format[i + 3 .. close_pos];
+                    var wrap_width: usize = 0;
+                    var wrap_indent1: usize = 0;
+                    var wrap_indent2: usize = 0;
+                    var pit = std.mem.splitScalar(u8, params, ',');
+                    if (pit.next()) |w| wrap_width = std.fmt.parseInt(usize, std.mem.trim(u8, w, " "), 10) catch 0;
+                    if (pit.next()) |ind1| wrap_indent1 = std.fmt.parseInt(usize, std.mem.trim(u8, ind1, " "), 10) catch 0;
+                    if (pit.next()) |ind2| wrap_indent2 = std.fmt.parseInt(usize, std.mem.trim(u8, ind2, " "), 10) catch 0;
+                    // Format the rest of the string, then wrap the result
+                    const rest_start = close_pos + 1;
+                    var rest_buf = std.array_list.Managed(u8).init(out.allocator);
+                    defer rest_buf.deinit();
+                    try outputFormattedCommitFromData(format[rest_start..], commit_hash, commit_data, &rest_buf, out.allocator);
+                    if (wrap_width > 0 and rest_buf.items.len > 0) {
+                        const wrapped = try wrapText(out.allocator, rest_buf.items, wrap_width, wrap_indent1, wrap_indent2);
+                        defer out.allocator.free(wrapped);
+                        try out.appendSlice(wrapped);
+                    } else {
+                        try out.appendSlice(rest_buf.items);
+                    }
+                    return; // rest already handled recursively
+                } else {
+                    i += 2;
+                }
             } else {
                 try out.append(format[i]);
                 try out.append(format[i + 1]);
