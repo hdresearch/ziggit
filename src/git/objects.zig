@@ -1709,6 +1709,8 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
         return error.CorruptedPackIndex;
     }
     
+    // PERF: Pre-compute 4-byte prefix for fast comparison in binary search
+    const target_prefix = std.mem.readInt(u32, target_hash[0..4], .big);
     var low = start_index;
     var high = end_index;
     var object_index: ?u32 = null;
@@ -1718,14 +1720,23 @@ fn findObjectInPack(pack_dir_path: []const u8, idx_filename: []const u8, hash_st
         const sha1_offset = sha1_table_start + mid * 20;
         const obj_hash = idx_data[sha1_offset..sha1_offset + 20];
         
-        const cmp = std.mem.order(u8, obj_hash, &target_hash);
-        switch (cmp) {
-            .eq => {
-                object_index = mid;
-                break;
-            },
-            .lt => low = mid + 1,
-            .gt => high = mid,
+        // Fast 4-byte prefix comparison shortcut
+        const entry_prefix = std.mem.readInt(u32, obj_hash[0..4], .big);
+        if (entry_prefix < target_prefix) {
+            low = mid + 1;
+        } else if (entry_prefix > target_prefix) {
+            high = mid;
+        } else {
+            // Prefix matches — full comparison needed
+            const cmp = std.mem.order(u8, obj_hash, &target_hash);
+            switch (cmp) {
+                .eq => {
+                    object_index = mid;
+                    break;
+                },
+                .lt => low = mid + 1,
+                .gt => high = mid,
+            }
         }
     }
     
