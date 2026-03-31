@@ -115,6 +115,17 @@ pub fn cmdLog(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
             invert_grep = true;
         } else if (std.mem.startsWith(u8, arg, "--encoding=")) {
             output_encoding = arg["--encoding=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--diff-filter=") or std.mem.startsWith(u8, arg, "--diff-algorithm=") or std.mem.startsWith(u8, arg, "--inter-hunk-context=") or std.mem.startsWith(u8, arg, "--src-prefix=") or std.mem.startsWith(u8, arg, "--dst-prefix=") or std.mem.startsWith(u8, arg, "--stat=") or std.mem.startsWith(u8, arg, "--line-prefix=")) {
+            // Accept diff-related options with = form
+        } else if (std.mem.eql(u8, arg, "--diff-filter") or std.mem.eql(u8, arg, "--diff-algorithm")) {
+            // Accept diff-related options with separate value
+            _ = args.next();
+        } else if (std.mem.eql(u8, arg, "--no-renames") or std.mem.eql(u8, arg, "--find-renames") or std.mem.eql(u8, arg, "--find-copies") or std.mem.eql(u8, arg, "--find-copies-harder") or std.mem.eql(u8, arg, "--name-only") or std.mem.eql(u8, arg, "--name-status") or std.mem.eql(u8, arg, "--stat") or std.mem.eql(u8, arg, "--numstat") or std.mem.eql(u8, arg, "--shortstat") or std.mem.eql(u8, arg, "--dirstat") or std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "--no-stat") or std.mem.eql(u8, arg, "--patch") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--no-patch") or std.mem.eql(u8, arg, "-s")) {
+            // Accept diff-related flags
+        } else if (std.mem.eql(u8, arg, "--no-walk") or std.mem.startsWith(u8, arg, "--no-walk=")) {
+            // Accept --no-walk
+        } else if (std.mem.eql(u8, arg, "--do-walk")) {
+            // Accept --do-walk
         } else if (std.mem.eql(u8, arg, "--")) {
             // Everything after -- is a path, ignore for now
             break;

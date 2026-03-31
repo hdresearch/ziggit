@@ -102,6 +102,7 @@ pub const cSetenv = helpers.cSetenv;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 pub fn zigzitMain(allocator: std.mem.Allocator) !void {
+
     const platform_impl = platform_mod.getCurrentPlatform();
     
     var args = try platform_impl.getArgs(allocator);
@@ -870,6 +871,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         // Use our native clone implementation (supports --depth for shallow clones)
         try cmd_clone.cmdClone(allocator, &args_iter, &platform_impl, all_original_args.items);
     } else if (std.mem.eql(u8, command, "rev-parse")) {
+
         try cmd_rev_parse.cmdRevParse(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "checkout")) {
         try cmd_checkout.cmdCheckout(allocator, &args_iter, &platform_impl);
