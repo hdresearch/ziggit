@@ -1489,10 +1489,28 @@ pub const Repository = struct {
                 const checksum_hex = try pack_writer.savePackFast(self.allocator, self.git_dir, fetch_result.pack_data);
                 defer self.allocator.free(checksum_hex);
 
-                // Generate idx
-                const pp = try pack_writer.packPath(self.allocator, self.git_dir, checksum_hex);
-                defer self.allocator.free(pp);
-                try idx_writer.generateIdx(self.allocator, pp);
+                // Generate idx from in-memory pack data (avoid re-reading from disk)
+                const idx_data = try idx_writer.generateIdxFromData(self.allocator, fetch_result.pack_data);
+                defer self.allocator.free(idx_data);
+                const ip = try pack_writer.idxPath(self.allocator, self.git_dir, checksum_hex);
+                defer self.allocator.free(ip);
+                const idx_file = try std.fs.cwd().createFile(ip, .{});
+                defer idx_file.close();
+                try idx_file.writeAll(idx_data);
+
+                // Invalidate pack cache so next operation picks up the new pack
+                if (self._cached_pack_mmap) |old| {
+                    std.posix.munmap(old);
+                    self._cached_pack_mmap = null;
+                }
+                self._cached_pack_data = null;
+                if (self._cached_idx_mmap) |old| {
+                    std.posix.munmap(old);
+                    self._cached_idx_mmap = null;
+                }
+                self._cached_idx_data = null;
+                // Re-warm pack cache with new data
+                self.prewarmPackCache() catch {};
             }
 
             // Update refs — for bare repos update refs/heads directly,
@@ -1509,6 +1527,16 @@ pub const Repository = struct {
                 }
                 try writeRemoteRef(self.allocator, self.git_dir, "origin", ref.name, &ref.hash);
             }
+
+            // Invalidate packed-refs cache since refs changed
+            if (self._cached_packed_refs_map) |*map| {
+                var m = map.*;
+                m.deinit();
+            }
+            self._cached_packed_refs_map = null;
+            if (self._cached_packed_refs) |pr| self.allocator.free(pr);
+            self._cached_packed_refs = null;
+            self._cached_head_hash = null;
         }
     }
 
@@ -1543,9 +1571,21 @@ pub const Repository = struct {
                 const checksum_hex = try pack_writer.savePackFast(self.allocator, self.git_dir, fetch_result.pack_data);
                 defer self.allocator.free(checksum_hex);
 
-                const pp = try pack_writer.packPath(self.allocator, self.git_dir, checksum_hex);
-                defer self.allocator.free(pp);
-                try idx_writer.generateIdx(self.allocator, pp);
+                // Generate idx from in-memory pack data (avoid re-reading from disk)
+                const idx_data = try idx_writer.generateIdxFromData(self.allocator, fetch_result.pack_data);
+                defer self.allocator.free(idx_data);
+                const ip = try pack_writer.idxPath(self.allocator, self.git_dir, checksum_hex);
+                defer self.allocator.free(ip);
+                const idx_file = try std.fs.cwd().createFile(ip, .{});
+                defer idx_file.close();
+                try idx_file.writeAll(idx_data);
+
+                // Re-warm pack cache
+                if (self._cached_pack_mmap) |old| { std.posix.munmap(old); self._cached_pack_mmap = null; }
+                self._cached_pack_data = null;
+                if (self._cached_idx_mmap) |old| { std.posix.munmap(old); self._cached_idx_mmap = null; }
+                self._cached_idx_data = null;
+                self.prewarmPackCache() catch {};
             }
 
             const is_bare = self.isBareRepo();
@@ -1555,6 +1595,16 @@ pub const Repository = struct {
                 }
                 try writeRemoteRef(self.allocator, self.git_dir, "origin", ref.name, &ref.hash);
             }
+
+            // Invalidate packed-refs cache since refs changed
+            if (self._cached_packed_refs_map) |*map| {
+                var m = map.*;
+                m.deinit();
+            }
+            self._cached_packed_refs_map = null;
+            if (self._cached_packed_refs) |pr| self.allocator.free(pr);
+            self._cached_packed_refs = null;
+            self._cached_head_hash = null;
         }
     }
 
