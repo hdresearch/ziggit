@@ -2694,8 +2694,8 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         // Print summary
         if (!quiet) {
             if (succinct_mod.isEnabled()) {
-                const branch_name = current_branch_opt orelse "HEAD";
-                const msg = try std.fmt.allocPrint(allocator, "ok pull {s}\n", .{branch_name});
+                const current_branch = current_branch_opt orelse "HEAD";
+                const msg = try std.fmt.allocPrint(allocator, "ok pull {s}\n", .{current_branch});
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             } else {
