@@ -882,80 +882,89 @@ pub fn showStagedDiff(index: *const index_mod.Index, git_path: []const u8, platf
 
 pub fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, quiet: bool) !bool {
     var has_diff = false;
-    for (index.entries.items) |entry| {
-        const full_path = if (std.fs.path.isAbsolute(entry.path))
-            try allocator.dupe(u8, entry.path)
-        else
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, entry.path });
-        defer allocator.free(full_path);
-        
-        // helpers.Check if file exists and has changed
-        if (platform_impl.fs.exists(full_path) catch false) {
-            // OPTIMIZATION: Fast stat-based skip for unchanged files
-            const file_stat = std.fs.cwd().statFile(full_path) catch null;
-            if (file_stat) |st| {
-                const work_mtime_sec = @as(u32, @intCast(@divTrunc(st.mtime, 1_000_000_000)));
-                const work_size = @as(u32, @intCast(st.size));
-                if (work_mtime_sec == entry.mtime_sec and work_size == entry.size) {
-                    continue; // File unchanged based on stat - skip expensive hash
-                }
-            }
+    // Use a stack buffer for path construction to avoid per-file allocation
+    var path_buf: [4096]u8 = undefined;
+    const cwd_prefix_len = if (std.fs.path.isAbsolute(cwd)) cwd.len + 1 else 0;
+    if (cwd_prefix_len > 0 and cwd.len < path_buf.len) {
+        @memcpy(path_buf[0..cwd.len], cwd);
+        path_buf[cwd.len] = '/';
+    }
 
-            const current_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
-            defer allocator.free(current_content);
-            
-            // helpers.Create blob object to get hash
-            const blob = try objects.createBlobObject(current_content, allocator);
-            defer blob.deinit(allocator);
-            
-            const current_hash = try blob.hash(allocator);
-            defer allocator.free(current_hash);
-            
-            // helpers.Compare with index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
-            defer allocator.free(index_hash);
-            
-            if (!std.mem.eql(u8, current_hash, index_hash)) {
+    for (index.entries.items) |entry| {
+        // Build path in stack buffer
+        const full_path = blk: {
+            if (std.fs.path.isAbsolute(entry.path)) {
+                break :blk entry.path;
+            }
+            if (cwd_prefix_len > 0 and cwd_prefix_len + entry.path.len < path_buf.len) {
+                @memcpy(path_buf[cwd_prefix_len..][0..entry.path.len], entry.path);
+                break :blk path_buf[0 .. cwd_prefix_len + entry.path.len];
+            }
+            // Fallback to alloc for very long paths
+            const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, entry.path });
+            break :blk p;
+        };
+        const full_path_allocated = if (full_path.ptr != path_buf[0..].ptr and full_path.ptr != entry.path.ptr) true else false;
+        defer if (full_path_allocated) allocator.free(full_path);
+
+        // Single stat call instead of exists() + statFile()
+        const file_stat = std.fs.cwd().statFile(full_path) catch |err| {
+            if (err == error.FileNotFound) {
+                // File was deleted
                 has_diff = true;
                 if (quiet) continue;
-                // helpers.Get indexed content for diff
-                const indexed_content = helpers.getIndexedFileContent(entry, allocator) catch "";
-                defer if (indexed_content.len > 0) allocator.free(indexed_content);
-                
-                // helpers.Generate unified diff
-                const short_index_hash = index_hash[0..7];
-                const short_current_hash = current_hash[0..7];
-                const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, current_content, entry.path, short_index_hash, short_current_hash, allocator) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
+                const indexed_content = helpers.getIndexedFileContent(entry, allocator) catch continue;
+                defer allocator.free(indexed_content);
+
+                var index_hash_buf: [40]u8 = undefined;
+                _ = std.fmt.bufPrint(&index_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+
+                const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, "", entry.path, index_hash_buf[0..7], "0000000", allocator) catch |e| switch (e) {
+                    error.OutOfMemory => return e,
                 };
                 defer allocator.free(diff_output);
-                
                 try platform_impl.writeStdout(diff_output);
+                continue;
             }
-        } else {
-            // File was deleted
+            continue;
+        };
+
+        // Fast stat-based skip for unchanged files
+        const work_mtime_sec: u32 = @intCast(@max(0, @divTrunc(file_stat.mtime, 1_000_000_000)));
+        const work_size: u32 = @intCast(@min(file_stat.size, std.math.maxInt(u32)));
+        if (work_mtime_sec == entry.mtime_sec and work_size == entry.size) {
+            continue; // File unchanged based on stat - skip expensive hash
+        }
+
+        const current_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
+        defer allocator.free(current_content);
+
+        // Compute SHA1 directly without creating blob object
+        var header_buf: [32]u8 = undefined;
+        const header = std.fmt.bufPrint(&header_buf, "blob {d}\x00", .{current_content.len}) catch continue;
+        var hasher = std.crypto.hash.Sha1.init(.{});
+        hasher.update(header);
+        hasher.update(current_content);
+        var file_hash: [20]u8 = undefined;
+        hasher.final(&file_hash);
+
+        // Compare raw bytes directly - no hex formatting needed
+        if (!std.mem.eql(u8, &file_hash, &entry.sha1)) {
             has_diff = true;
             if (quiet) continue;
-            const indexed_content = helpers.getIndexedFileContent(entry, allocator) catch continue;
-            defer allocator.free(indexed_content);
-            
-            // helpers.Calculate hash for empty content
-            const empty_blob = try objects.createBlobObject("", allocator);
-            defer empty_blob.deinit(allocator);
-            const empty_hash = try empty_blob.hash(allocator);
-            defer allocator.free(empty_hash);
-            
-            // helpers.Get index hash
-            const index_hash = try std.fmt.allocPrint(allocator, "{x}", .{&entry.sha1});
-            defer allocator.free(index_hash);
-            
-            const short_index_hash = index_hash[0..7];
-            const short_empty_hash = empty_hash[0..7];
-            const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, "", entry.path, short_index_hash, short_empty_hash, allocator) catch |err| switch (err) {
+            // Only format hashes when we actually need to output
+            var index_hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&index_hash_buf, "{x}", .{&entry.sha1}) catch continue;
+            var current_hash_buf: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&current_hash_buf, "{x}", .{&file_hash}) catch continue;
+
+            const indexed_content = helpers.getIndexedFileContent(entry, allocator) catch "";
+            defer if (indexed_content.len > 0) allocator.free(indexed_content);
+
+            const diff_output = diff_mod.generateUnifiedDiffWithHashes(indexed_content, current_content, entry.path, index_hash_buf[0..7], current_hash_buf[0..7], allocator) catch |err| switch (err) {
                 error.OutOfMemory => return err,
             };
             defer allocator.free(diff_output);
-            
             try platform_impl.writeStdout(diff_output);
         }
     }
