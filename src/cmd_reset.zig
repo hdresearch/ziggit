@@ -308,10 +308,26 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         switch (reset_mode) {
             .soft => {
                 // helpers.Only update helpers.HEAD, leave index and working tree unchanged
+                if (succinct_mod.isEnabled()) {
+                    const ref_str = target_ref orelse "HEAD";
+                    const reset_msg = std.fmt.allocPrint(allocator, "ok reset soft {s}\n", .{ref_str}) catch "";
+                    if (reset_msg.len > 0) {
+                        defer allocator.free(reset_msg);
+                        platform_impl.writeStdout(reset_msg) catch {};
+                    }
+                }
             },
             .mixed => {
                 // helpers.Update helpers.HEAD and index, leave working tree unchanged
                 resetIndex(git_path, target_hash, platform_impl, allocator, !no_refresh) catch {};
+                if (succinct_mod.isEnabled()) {
+                    const ref_str = target_ref orelse "HEAD";
+                    const reset_msg = std.fmt.allocPrint(allocator, "ok reset mixed {s}\n", .{ref_str}) catch "";
+                    if (reset_msg.len > 0) {
+                        defer allocator.free(reset_msg);
+                        platform_impl.writeStdout(reset_msg) catch {};
+                    }
+                }
             },
             .hard, .merge_mode => {
                 // helpers.Clear old tracked files first (using helpers.OLD index), then checkout target tree
