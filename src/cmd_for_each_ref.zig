@@ -255,6 +255,10 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         }.lessThan);
     }
 
+    // Pre-compute what the format needs (invariant across refs)
+    const fmt_needs_data = formatNeedsObjectData(format);
+    const fmt_needs_type = formatNeedsObjectType(format);
+
     // Filter and format output using buffered writes
     var output_count: usize = 0;
     var out_buf = std.array_list.Managed(u8).init(allocator);
@@ -310,10 +314,11 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         var obj_loaded: ?objects.GitObject = null;
         defer if (obj_loaded) |ol| ol.deinit(allocator);
 
-        // Fast path: infer type from ref path to avoid object loading
-        // when the format only needs objectname/objecttype/refname
-        const needs_data = formatNeedsObjectData(format);
-        if (!needs_data) {
+        // Fast path: check what the format actually needs
+        if (!fmt_needs_data and !fmt_needs_type) {
+            // Format doesn't need type or data at all - skip all object lookups
+            obj_type = "commit";
+        } else if (!fmt_needs_data) {
             // For branches, type is always commit
             if (std.mem.startsWith(u8, entry.name, "refs/heads/") or std.mem.startsWith(u8, entry.name, "refs/remotes/")) {
                 obj_type = "commit";
@@ -339,10 +344,9 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         }
 
         {
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj_data, quoting_style, entry.symref_target);
-            defer allocator.free(formatted);
-            if (omit_empty and formatted.len == 0) continue;
-            try out_buf.appendSlice(formatted);
+            const start_len = out_buf.items.len;
+            try formatRefOutputDirect(&out_buf, format, entry.name, entry.hash, obj_type, obj_data, quoting_style, allocator, entry.symref_target);
+            if (omit_empty and out_buf.items.len == start_len) continue;
             try out_buf.append('\n');
         }
         output_count += 1;
@@ -619,6 +623,54 @@ pub fn getRefField(field: []const u8, refname: []const u8, objectname: []const u
 
 
 
+/// Write formatted ref output directly to an output buffer, avoiding intermediate allocation.
+fn formatRefOutputDirect(out_buf: *std.array_list.Managed(u8), format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype, allocator: std.mem.Allocator, symref_target: ?[]const u8) !void {
+    var idx: usize = 0;
+    while (idx < format.len) {
+        if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '(') {
+            if (std.mem.indexOfScalar(u8, format[idx..], ')')) |close| {
+                const field = format[idx + 2 .. idx + close];
+                const value = getRefField(field, refname, objectname, objecttype, data, allocator, symref_target);
+                switch (quoting) {
+                    .shell, .perl, .python => {
+                        try out_buf.append('\'');
+                        for (value) |c| {
+                            if (c == '\'') {
+                                try out_buf.appendSlice("'\\''");
+                            } else {
+                                try out_buf.append(c);
+                            }
+                        }
+                        try out_buf.append('\'');
+                    },
+                    .tcl => {
+                        try out_buf.append('"');
+                        for (value) |c| {
+                            if (c == '"' or c == '\\' or c == '$' or c == '[' or c == ']' or c == '{' or c == '}') {
+                                try out_buf.append('\\');
+                            }
+                            try out_buf.append(c);
+                        }
+                        try out_buf.append('"');
+                    },
+                    .none => {
+                        try out_buf.appendSlice(value);
+                    },
+                }
+                idx += close + 1;
+                continue;
+            }
+        }
+        if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '%') {
+            try out_buf.append('%');
+            idx += 2;
+        } else {
+            try out_buf.append(format[idx]);
+            idx += 1;
+        }
+    }
+}
+
 pub fn formatRefOutput(allocator: std.mem.Allocator, format: []const u8, refname: []const u8, objectname: []const u8, objecttype: []const u8, data: []const u8, quoting: anytype, symref_target: ?[]const u8) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
@@ -806,6 +858,23 @@ fn validateTrailerOptions(options: []const u8, allocator: std.mem.Allocator) hel
     return .{ .valid = true };
 }
 
+
+/// Check if a format string references %(objecttype) at all.
+fn formatNeedsObjectType(format: []const u8) bool {
+    var idx: usize = 0;
+    while (idx < format.len) {
+        if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '(') {
+            if (std.mem.indexOfScalar(u8, format[idx..], ')')) |close| {
+                const field = format[idx + 2 .. idx + close];
+                if (std.mem.eql(u8, field, "objecttype")) return true;
+                idx += close + 1;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+    return false;
+}
 
 /// Check if a format string requires loading the full object data.
 /// Fields like objectname, objecttype, refname only need the hash and ref info.
