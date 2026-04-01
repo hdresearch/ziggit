@@ -255,8 +255,10 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
         }.lessThan);
     }
 
-    // Filter and format output
+    // Filter and format output using buffered writes
     var output_count: usize = 0;
+    var out_buf = std.array_list.Managed(u8).init(allocator);
+    defer out_buf.deinit();
     for (ref_list.items) |entry| {
         if (count_limit) |limit| {
             if (output_count >= limit) break;
@@ -311,18 +313,26 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
             const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data, quoting_style, entry.symref_target);
             defer allocator.free(formatted);
             if (omit_empty and formatted.len == 0) continue;
-            const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
+            try out_buf.appendSlice(formatted);
+            try out_buf.append('\n');
         } else |_| {
             const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "", quoting_style, entry.symref_target);
             defer allocator.free(formatted);
             if (omit_empty and formatted.len == 0) continue;
-            const output = std.fmt.allocPrint(allocator, "{s}\n", .{formatted}) catch continue;
-            defer allocator.free(output);
-            try platform_impl.writeStdout(output);
+            try out_buf.appendSlice(formatted);
+            try out_buf.append('\n');
         }
         output_count += 1;
+
+        // Flush periodically to avoid excessive memory use
+        if (out_buf.items.len > 64 * 1024) {
+            try platform_impl.writeStdout(out_buf.items);
+            out_buf.clearRetainingCapacity();
+        }
+    }
+    // Flush remaining output
+    if (out_buf.items.len > 0) {
+        try platform_impl.writeStdout(out_buf.items);
     }
 }
 
