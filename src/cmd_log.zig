@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -1549,6 +1550,48 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                     continue;
                 }
             }
+        }
+
+        // Succinct mode: compact one-line output
+        if (succinct_mod.isEnabled() and format_string == null and !oneline) {
+            const short_hash = cur_hash[0..@min(7, cur_hash.len)];
+            const msg_slice = if (message_start < commit_data.len) commit_data[message_start..] else "";
+            const nl = std.mem.indexOfScalar(u8, msg_slice, '\n') orelse msg_slice.len;
+            const subject = msg_slice[0..nl];
+            // Truncate subject at 72 chars
+            const trunc_subject = if (subject.len > 72) subject[0..69] else subject;
+            const ellipsis: []const u8 = if (subject.len > 72) "..." else "";
+            // Get author name
+            const a_name = if (author_line) |al| helpers.parseAuthorName(al) else "unknown";
+            // Get relative date
+            const date_str = if (author_line) |al| (helpers.parseAuthorDateRelative(al, allocator) catch null) else null;
+            defer if (date_str) |d| allocator.free(d);
+            const date_display = date_str orelse "";
+            output_buf.clearRetainingCapacity();
+            try output_buf.appendSlice(short_hash);
+            try output_buf.append(' ');
+            try output_buf.appendSlice(trunc_subject);
+            try output_buf.appendSlice(ellipsis);
+            try output_buf.appendSlice(" (");
+            try output_buf.appendSlice(date_display);
+            try output_buf.appendSlice(") ");
+            try output_buf.appendSlice(a_name);
+            try output_buf.append('\n');
+            try platform_impl.writeStdout(output_buf.items);
+
+            count += 1;
+            // Cap at 15 commits in succinct mode (unless explicit --max-count)
+            if (max_count == null and count >= 15) break;
+            if (!no_walk) {
+                for (parent_hashes) |parent| {
+                    if (!visited.contains(parent)) {
+                        try visited.put(try allocator.dupe(u8, parent), {});
+                        const pts = getTs.get(parent, maybe_cg, git_path, platform_impl, allocator);
+                        try queue.append(.{ .hash = try allocator.dupe(u8, parent), .timestamp = pts });
+                    }
+                }
+            }
+            continue;
         }
 
         // Display commit based on format

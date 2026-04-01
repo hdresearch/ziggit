@@ -8,6 +8,7 @@ const helpers = @import("git_helpers.zig");
 const cmd_reflog = @import("cmd_reflog.zig");
 const cmd_add = @import("cmd_add.zig");
 const hooks = @import("git/hooks.zig");
+const succinct_mod = @import("succinct.zig");
 
 fn isTrailerLine(line: []const u8) bool {
     if (std.mem.indexOf(u8, line, ": ")) |colon_pos| {
@@ -1194,12 +1195,21 @@ pub fn cmdCommit(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             break :blk std.mem.indexOf(u8, cobj.data, "parent ") == null;
         };
         
+        const trimmed_msg = std.mem.trimRight(u8, message.?, "\n");
+        // Extract first line of message for succinct mode
+        const first_line = if (std.mem.indexOfScalar(u8, trimmed_msg, '\n')) |nl| trimmed_msg[0..nl] else trimmed_msg;
+        if (succinct_mod.isEnabled()) {
+            const success_msg = try std.fmt.allocPrint(allocator, "ok {s} {s} \"{s}\"\n", .{ current_branch, short_hash, first_line });
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+            return;
+        }
         if (is_root) {
-            const success_msg = try std.fmt.allocPrint(allocator, "[{s} (root-commit) {s}] {s}\n", .{ current_branch, short_hash, std.mem.trimRight(u8, message.?, "\n") });
+            const success_msg = try std.fmt.allocPrint(allocator, "[{s} (root-commit) {s}] {s}\n", .{ current_branch, short_hash, trimmed_msg });
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
         } else {
-            const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, std.mem.trimRight(u8, message.?, "\n") });
+            const success_msg = try std.fmt.allocPrint(allocator, "[{s} {s}] {s}\n", .{ current_branch, short_hash, trimmed_msg });
             defer allocator.free(success_msg);
             try platform_impl.writeStdout(success_msg);
         }
