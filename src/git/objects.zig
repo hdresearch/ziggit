@@ -2218,6 +2218,122 @@ pub fn findOffsetInIdx(idx_data: []const u8, target_hash: [20]u8) ?usize {
     }
 }
 
+/// Get just the object type for a hash without decompressing the full data.
+/// Returns the ObjectType if found, null otherwise.
+/// This reads pack headers directly which is much faster than full decompression.
+pub fn getObjectTypeOnly(hash_str: []const u8, git_dir: []const u8, allocator: std.mem.Allocator) ?ObjectType {
+    // Check object cache first
+    if (hash_str.len == 40) {
+        var key: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&key, hash_str) catch return null;
+        const bucket = @as(usize, (@as(usize, key[0]) << 8 | @as(usize, key[1]))) % OBJECT_CACHE_BUCKETS;
+        if (object_cache_vals[bucket]) |entry| {
+            if (std.mem.eql(u8, &object_cache_keys[bucket], &key)) {
+                return entry.obj_type;
+            }
+        }
+    }
+
+    // Try pack files - read type from pack header without full decompression
+    const pack_dir_path = std.fmt.allocPrint(allocator, "{s}/objects/pack", .{git_dir}) catch return null;
+    defer allocator.free(pack_dir_path);
+
+    if (hash_str.len == 40) {
+        var target_hash: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&target_hash, hash_str) catch return null;
+
+        if (getCachedPackDir(pack_dir_path)) |idx_names| {
+            for (idx_names) |maybe_name| {
+                const name = maybe_name orelse continue;
+                if (getTypeFromPack(pack_dir_path, name, target_hash, allocator)) |t| return t;
+            }
+        } else {
+            // Scan pack directory
+            var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch return null;
+            defer pack_dir.close();
+            var idx_names_buf: [64][]const u8 = undefined;
+            var idx_count: usize = 0;
+            var iterator = pack_dir.iterate();
+            while (iterator.next() catch null) |entry| {
+                if (entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+                if (idx_count >= 64) break;
+                idx_names_buf[idx_count] = allocator.dupe(u8, entry.name) catch continue;
+                idx_count += 1;
+            }
+            if (idx_count > 0) {
+                cachePackDir(allocator, pack_dir_path, idx_names_buf[0..idx_count]);
+            }
+            for (idx_names_buf[0..idx_count]) |nm| {
+                if (getTypeFromPack(pack_dir_path, nm, target_hash, allocator)) |t| return t;
+            }
+        }
+    }
+
+    // Fall back to loose object - read just the type header
+    var path_buf: [4096]u8 = undefined;
+    const obj_path = std.fmt.bufPrint(&path_buf, "{s}/objects/{s}/{s}", .{ git_dir, hash_str[0..2], hash_str[2..] }) catch return null;
+    const file = std.fs.cwd().openFile(obj_path, .{}) catch return null;
+    defer file.close();
+    // Read just enough to get the type from the zlib header
+    var header_buf: [256]u8 = undefined;
+    const n = file.read(&header_buf) catch return null;
+    if (n < 2) return null;
+    // Decompress just the header
+    var out_buf: [64]u8 = undefined;
+    initCZlib();
+    const uncompress_fn = zlib_uncompress_fn orelse return null;
+    var dest_len: c_ulong = 64;
+    const ret = uncompress_fn(&out_buf, &dest_len, &header_buf, @intCast(n));
+    // Z_OK=0 or Z_BUF_ERROR=-5 (output truncated but header available)
+    if (ret != 0 and ret != -5) return null;
+    const out = out_buf[0..@intCast(dest_len)];
+    if (std.mem.startsWith(u8, out, "commit ")) return .commit;
+    if (std.mem.startsWith(u8, out, "tree ")) return .tree;
+    if (std.mem.startsWith(u8, out, "blob ")) return .blob;
+    if (std.mem.startsWith(u8, out, "tag ")) return .tag;
+    return null;
+}
+
+fn getTypeFromPack(pack_dir_path: []const u8, idx_name: []const u8, target_hash: [20]u8, allocator: std.mem.Allocator) ?ObjectType {
+    const idx_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ pack_dir_path, idx_name }) catch return null;
+    defer allocator.free(idx_path);
+
+    const idx_data = getCachedIdx(idx_path) orelse blk: {
+        const mapped = mmapFile(idx_path) orelse return null;
+        addToCacheEx(allocator, idx_path, mapped, true, "", "", false);
+        break :blk @as([]const u8, mapped);
+    };
+
+    const offset = findOffsetInIdx(idx_data, target_hash) orelse return null;
+
+    // Get pack data
+    const pack_path = std.fmt.allocPrint(allocator, "{s}/{s}.pack", .{ pack_dir_path, idx_name[0 .. idx_name.len - 4] }) catch return null;
+    defer allocator.free(pack_path);
+
+    const pack_data = getCachedPack(pack_path) orelse blk: {
+        const mapped = mmapFile(pack_path) orelse return null;
+        addToCacheEx(allocator, "", "", false, pack_path, mapped, true);
+        break :blk @as([]const u8, mapped);
+    };
+
+    if (offset >= pack_data.len) return null;
+    const first_byte = pack_data[offset];
+    const pack_type_num: u3 = @truncate((first_byte >> 4) & 7);
+
+    return switch (pack_type_num) {
+        1 => .commit,
+        2 => .tree,
+        3 => .blob,
+        4 => .tag,
+        6, 7 => {
+            // Delta types - need to resolve base, fall back to full load
+            return null;
+        },
+        else => null,
+    };
+}
+
 /// Apply delta to base data to reconstruct object with enhanced error handling and validation
 pub fn applyDelta(base_data: []const u8, delta_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
     return applyDeltaCore(base_data, delta_data, allocator) catch |err| {
