@@ -673,18 +673,22 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
                 defer allocator.free(normalized);
                 const co_action = crlf_mod.getCheckoutAction(.text, attrs.eol, autocrlf_val, eol_config_val, normalized);
                 if (co_action != .lf_to_crlf) {
-                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
-                    defer allocator.free(msg);
-                    platform_impl.writeStderr(msg) catch {};
+                    if (!succinct_mod.isEnabled()) {
+                        const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                        defer allocator.free(msg);
+                        platform_impl.writeStderr(msg) catch {};
+                    }
                     return;
                 }
             }
             if (hasBareLf(content)) {
                 const co_action = crlf_mod.getCheckoutAction(.text, attrs.eol, autocrlf_val, eol_config_val, content);
                 if (co_action == .lf_to_crlf) {
-                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
-                    defer allocator.free(msg);
-                    platform_impl.writeStderr(msg) catch {};
+                    if (!succinct_mod.isEnabled()) {
+                        const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                        defer allocator.free(msg);
+                        platform_impl.writeStderr(msg) catch {};
+                    }
                 }
             }
         },
@@ -698,14 +702,18 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
             const co_action = crlf_mod.getCheckoutAction(.text_auto, attrs.eol, autocrlf_val, eol_config_val, normalized);
             if (hasCrlf(content) and co_action != .lf_to_crlf) {
                 // CRLF->LF on add, checkout won't restore CRLF
-                const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
-                defer allocator.free(msg);
-                platform_impl.writeStderr(msg) catch {};
+                if (!succinct_mod.isEnabled()) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                }
             } else if (hasBareLf(content) and co_action == .lf_to_crlf) {
                 // LF->CRLF on checkout
-                const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
-                defer allocator.free(msg);
-                platform_impl.writeStderr(msg) catch {};
+                if (!succinct_mod.isEnabled()) {
+                    const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                    defer allocator.free(msg);
+                    platform_impl.writeStderr(msg) catch {};
+                }
             }
         },
         .no_text => {},
@@ -718,16 +726,20 @@ fn emitCrlfWarning(allocator: std.mem.Allocator, relative_path: []const u8, full
                 if (std.mem.eql(u8, ac, "true") and is_text and !hasLoneCr(content)) {
                     // autocrlf=true: warn about LF->CRLF for files with bare LF
                     if (hasBareLf(content) and !hasCrlf(content)) {
-                        const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
-                        defer allocator.free(msg);
-                        platform_impl.writeStderr(msg) catch {};
+                        if (!succinct_mod.isEnabled()) {
+                            const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', LF will be replaced by CRLF the next time Git touches it\n", .{relative_path});
+                            defer allocator.free(msg);
+                            platform_impl.writeStderr(msg) catch {};
+                        }
                     }
                 } else if (std.mem.eql(u8, ac, "input") and is_text and !hasLoneCr(content)) {
                     // autocrlf=input: warn about CRLF->LF for files with CRLF
                     if (hasCrlf(content)) {
-                        const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
-                        defer allocator.free(msg);
-                        platform_impl.writeStderr(msg) catch {};
+                        if (!succinct_mod.isEnabled()) {
+                            const msg = try std.fmt.allocPrint(allocator, "warning: in the working copy of '{s}', CRLF will be replaced by LF the next time Git touches it\n", .{relative_path});
+                            defer allocator.free(msg);
+                            platform_impl.writeStderr(msg) catch {};
+                        }
                     }
                 }
             }
