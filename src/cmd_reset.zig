@@ -371,6 +371,20 @@ pub fn cmdReset(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             const hook_args = [_][]const u8{ prev_short, new_short, "1" };
             _ = hooks.runHook(allocator, git_path, "post-checkout", &hook_args, null, platform_impl) catch {};
         }
+        
+        // Output success message for soft and mixed resets (but not for path resets)
+        if ((reset_mode == .soft or reset_mode == .mixed) and reset_paths.items.len == 0) {
+            if (succinct_mod.isEnabled()) {
+                const mode_str = if (reset_mode == .soft) "soft" else "mixed";
+                const ref_str = target_ref orelse "HEAD";
+                const reset_msg = std.fmt.allocPrint(allocator, "ok reset {s} {s}\n", .{ mode_str, ref_str }) catch "";
+                if (reset_msg.len > 0) {
+                    defer allocator.free(reset_msg);
+                    platform_impl.writeStdout(reset_msg) catch {};
+                }
+            }
+            // Note: non-succinct soft and mixed resets are traditionally silent
+        }
     } else {
         // Unborn branch: reset clears the index (and working tree for --hard)
         const index_path = std.fmt.allocPrint(allocator, "{s}/index", .{git_path}) catch return;
