@@ -5,6 +5,7 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const cmd_gc = @import("cmd_gc.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -269,6 +270,10 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     
     // Detect detached HEAD
     const is_detached = std.mem.eql(u8, current_branch, "HEAD");
+
+    // Succinct mode: compact output for LLM agents
+    const succinct_active = succinct_mod.isEnabled() and !porcelain_explicit and !short_format and !nul_terminate;
+    if (succinct_active) porcelain = true; // collect into porcelain_lines, reformat at end
 
     if (!porcelain) {
         if (is_detached) {
