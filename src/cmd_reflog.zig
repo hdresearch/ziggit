@@ -144,10 +144,15 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
             }
         }
 
-        // helpers.Output in reverse order
+        // helpers.Output in reverse order using buffered writer
         var entry_idx: usize = entries.items.len;
         var seq: usize = 0;
         var output_count: usize = 0;
+        // Pre-allocate output buffer to avoid per-line allocations
+        var out_buf = std.array_list.Managed(u8).init(allocator);
+        defer out_buf.deinit();
+        try out_buf.ensureTotalCapacity(entries.items.len * 80); // estimate ~80 bytes per line
+        var buf_writer = out_buf.writer();
         while (entry_idx > 0) {
             if (max_count) |mc| {
                 if (output_count >= mc) break;
@@ -160,8 +165,6 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
                 // helpers.Extract new sha and old sha
                 if (line.len >= 82) {
                     const new_sha = line[41..81];
-                    const old_sha = line[0..40];
-                    _ = old_sha;
 
                     // Apply --grep filtering
                     if (grep_pattern) |gp| {
@@ -184,40 +187,43 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
 
                     if (format) |fmt| {
                         // Simple format string handling
-                        var output_buf = std.array_list.Managed(u8).init(allocator);
-                        defer output_buf.deinit();
                         var fi: usize = 0;
                         while (fi < fmt.len) {
                             if (fmt[fi] == '%' and fi + 1 < fmt.len) {
                                 switch (fmt[fi + 1]) {
-                                    'H' => output_buf.appendSlice(new_sha) catch {},
-                                    'h' => output_buf.appendSlice(new_sha[0..@min(7, new_sha.len)]) catch {},
-                                    's' => output_buf.appendSlice(msg) catch {},
-                                    'n' => output_buf.append('\n') catch {},
+                                    'H' => buf_writer.writeAll(new_sha) catch {},
+                                    'h' => buf_writer.writeAll(new_sha[0..@min(7, new_sha.len)]) catch {},
+                                    's' => buf_writer.writeAll(msg) catch {},
+                                    'n' => buf_writer.writeByte('\n') catch {},
                                     else => {
-                                        output_buf.append('%') catch {};
-                                        output_buf.append(fmt[fi + 1]) catch {};
+                                        buf_writer.writeByte('%') catch {};
+                                        buf_writer.writeByte(fmt[fi + 1]) catch {};
                                     },
                                 }
                                 fi += 2;
                             } else {
-                                output_buf.append(fmt[fi]) catch {};
+                                buf_writer.writeByte(fmt[fi]) catch {};
                                 fi += 1;
                             }
                         }
-                        output_buf.append('\n') catch {};
-                        try platform_impl.writeStdout(output_buf.items);
+                        buf_writer.writeByte('\n') catch {};
                     } else {
-                        const selector = std.fmt.allocPrint(allocator, "{s}@{{{d}}}", .{ ref_name, seq }) catch continue;
-                        defer allocator.free(selector);
-                        const output = std.fmt.allocPrint(allocator, "{s} {s}: {s}\n", .{ new_sha[0..@min(7, new_sha.len)], selector, msg }) catch continue;
-                        defer allocator.free(output);
-                        try platform_impl.writeStdout(output);
+                        // Write directly: "<short_sha> <ref>@{<seq>}: <msg>\n"
+                        buf_writer.writeAll(new_sha[0..@min(7, new_sha.len)]) catch continue;
+                        buf_writer.writeByte(' ') catch continue;
+                        buf_writer.writeAll(ref_name) catch continue;
+                        buf_writer.print("@{{{d}}}: ", .{seq}) catch continue;
+                        buf_writer.writeAll(msg) catch continue;
+                        buf_writer.writeByte('\n') catch continue;
                     }
                     output_count += 1;
                 }
             }
             seq += 1;
+        }
+        // Flush all output at once
+        if (out_buf.items.len > 0) {
+            try platform_impl.writeStdout(out_buf.items);
         }
     } else if (std.mem.eql(u8, subcmd, "expire")) {
         // Expire old reflog entries - for now, no-op
