@@ -40,9 +40,36 @@ fn runSubcommand(allocator: std.mem.Allocator, args: []const []const u8) RunErro
     }
 }
 
+/// Detect the default branch by reading origin/HEAD, then checking for
+/// origin/main or origin/master refs. Falls back to "main".
+fn detectDefaultBranch() []const u8 {
+    // Try reading .git/refs/remotes/origin/HEAD
+    if (std.fs.cwd().openFile(".git/refs/remotes/origin/HEAD", .{})) |file| {
+        defer file.close();
+        var buf: [256]u8 = undefined;
+        const n = file.read(&buf) catch return "main";
+        const content = std.mem.trimRight(u8, buf[0..n], "\r\n ");
+        // Format: "ref: refs/remotes/origin/BRANCH"
+        const prefix = "ref: refs/remotes/origin/";
+        if (std.mem.startsWith(u8, content, prefix)) {
+            return content[prefix.len..];
+        }
+    } else |_| {}
+
+    // Fallback: check which ref files exist
+    if (std.fs.cwd().access(".git/refs/remotes/origin/main", .{})) |_| {
+        return "main";
+    } else |_| {}
+    if (std.fs.cwd().access(".git/refs/remotes/origin/master", .{})) |_| {
+        return "master";
+    } else |_| {}
+
+    return "main";
+}
+
 /// restart [BRANCH] — fetch origin && rebase onto origin/BRANCH
 pub fn cmdRestart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIterator) !void {
-    const branch = args_iter.next() orelse "main";
+    const branch = args_iter.next() orelse detectDefaultBranch();
 
     const origin_branch = std.fmt.allocPrint(allocator, "origin/{s}", .{branch}) catch return error.OutOfMemory;
     defer allocator.free(origin_branch);
@@ -62,7 +89,7 @@ pub fn cmdRestart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIter
 
 /// start [BRANCH] — stash work, restart, restore work
 pub fn cmdStart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIterator) !void {
-    const branch = args_iter.next() orelse "main";
+    const branch = args_iter.next() orelse detectDefaultBranch();
 
     // add -A (ignore failure — nothing to add is fine)
     runSubcommand(allocator, &.{ "add", "-A" }) catch {};
@@ -120,8 +147,9 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
         return e;
     };
 
-    // restart
-    runSubcommand(allocator, &.{"restart"}) catch |e| {
+    // restart (detect default branch since progress doesn't take a branch arg)
+    const branch = detectDefaultBranch();
+    runSubcommand(allocator, &.{ "restart", branch }) catch |e| {
         printErr(allocator, "FAILED: restart after push (commit+push succeeded)\n", .{});
         return e;
     };
