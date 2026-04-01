@@ -1317,11 +1317,15 @@ pub const GitObject = struct {
             } else |_| {}
         }
 
-        const obj_dir = hash_str[0..2];
-        const obj_file = hash_str[2..];
-        
-        const obj_file_path = try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_dir, obj_dir, obj_file });
-        defer allocator.free(obj_file_path);
+        // Use stack buffer for object path to avoid allocation
+        var path_buf: [4096]u8 = undefined;
+        const path_len = git_dir.len + "/objects/".len + 2 + 1 + (hash_str.len - 2);
+        const obj_file_path = if (path_len <= path_buf.len) blk: {
+            break :blk std.fmt.bufPrint(&path_buf, "{s}/objects/{s}/{s}", .{ git_dir, hash_str[0..2], hash_str[2..] }) catch unreachable;
+        } else blk: {
+            break :blk try std.fmt.allocPrint(allocator, "{s}/objects/{s}/{s}", .{ git_dir, hash_str[0..2], hash_str[2..] });
+        };
+        defer if (path_len > path_buf.len) allocator.free(obj_file_path);
 
         const compressed_content = platform_impl.fs.readFile(allocator, obj_file_path) catch |err| switch (err) {
             error.FileNotFound => {
