@@ -1392,7 +1392,10 @@ pub const Repository = struct {
     pub fn checkoutTo(self: *Repository, ref: []const u8, target_dir: []const u8) !void {
         const commit_hash = try self.findCommit(ref);
         const tree_hash = try self.getCommitTree(&commit_hash);
-        try self.checkoutTree(&tree_hash, target_dir);
+        // Use raw-bytes tree walk to avoid hex conversion at every level
+        var tree_bytes: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&tree_bytes, &tree_hash) catch return error.InvalidTreeObject;
+        try self.checkoutTreeRaw(&tree_bytes, target_dir);
     }
 
     /// Update HEAD for a checkout — if ref is a branch, make HEAD a symbolic ref
@@ -3006,6 +3009,114 @@ pub const Repository = struct {
         }
 
         return error.InvalidCommitObject;
+    }
+
+    /// Checkout tree using raw 20-byte SHA (avoids hex conversion at every tree level).
+    /// This is the fast path for checkoutTo.
+    fn checkoutTreeRaw(self: *Repository, tree_hash_bytes: *const [20]u8, target_path: []const u8) !void {
+        const fa = self._fast_alloc;
+        const tree_content = self.readObjectContentFromPackBytes(tree_hash_bytes) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{tree_hash_bytes}) catch return error.InvalidTreeObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidTreeObject;
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidTreeObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(tree_content);
+
+        // Open target directory once for openat()-based file creation
+        var target_dir = std.fs.openDirAbsolute(target_path, .{}) catch null;
+        defer if (target_dir) |*d| d.close();
+
+        var pos: usize = 0;
+        while (pos < tree_content.len) {
+            const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
+            const mode = tree_content[pos..space_pos];
+            const name_start = space_pos + 1;
+            const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
+            const name = tree_content[name_start..null_pos_name];
+            const sha_start = null_pos_name + 1;
+            if (sha_start + 20 > tree_content.len) break;
+            const sha_bytes = tree_content[sha_start .. sha_start + 20];
+
+            if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
+                // Write blob using dir fd when available
+                if (target_dir) |*dir| {
+                    self.checkoutBlobRawDir(sha_bytes[0..20], dir, name) catch {
+                        self.checkoutBlobRaw(sha_bytes[0..20], target_path, name) catch {};
+                    };
+                } else {
+                    self.checkoutBlobRaw(sha_bytes[0..20], target_path, name) catch {};
+                }
+            } else if (std.mem.eql(u8, mode, "40000")) {
+                var subdir_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const subdir_path = std.fmt.bufPrint(&subdir_buf, "{s}/{s}", .{ target_path, name }) catch {
+                    pos = sha_start + 20;
+                    continue;
+                };
+                std.fs.makeDirAbsolute(subdir_path) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => std.fs.cwd().makePath(subdir_path) catch {},
+                };
+                self.checkoutTreeRaw(sha_bytes[0..20], subdir_path) catch {};
+            }
+            pos = sha_start + 20;
+        }
+    }
+
+    /// Write blob to a pre-opened directory fd using raw 20-byte SHA
+    fn checkoutBlobRawDir(self: *Repository, sha20: *const [20]u8, dir: *std.fs.Dir, filename: []const u8) !void {
+        const fa = self._fast_alloc;
+        const content = self.readObjectContentFromPackBytes(sha20) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch return error.InvalidBlobObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidBlobObject;
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidBlobObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(content);
+        const file = dir.createFile(filename, .{ .truncate = true }) catch return error.InvalidBlobObject;
+        file.writeAll(content) catch {
+            file.close();
+            return error.InvalidBlobObject;
+        };
+        file.close();
+    }
+
+    /// Write blob using absolute path and raw 20-byte SHA
+    fn checkoutBlobRaw(self: *Repository, sha20: *const [20]u8, target_path: []const u8, filename: []const u8) !void {
+        const fa = self._fast_alloc;
+        const content = self.readObjectContentFromPackBytes(sha20) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch return error.InvalidBlobObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidBlobObject;
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidBlobObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(content);
+        var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ target_path, filename }) catch return;
+        const file = std.fs.createFileAbsolute(file_path, .{ .truncate = true }) catch return;
+        file.writeAll(content) catch {
+            file.close();
+            return;
+        };
+        file.close();
     }
 
     fn checkoutTree(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8) !void {
