@@ -193,14 +193,18 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                         orig_hash_hex[bi * 2 + 1] = "0123456789abcdef"[byte & 0xf];
                     }
                     if (!std.mem.eql(u8, hash_dr, &orig_hash_hex)) {
-                        const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{orig_entry.path});
+                        if (!succinct_mod.isEnabled()) {
+                            const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{orig_entry.path});
+                            defer allocator.free(msg_dr);
+                            try platform_impl.writeStdout(msg_dr);
+                        }
+                    }
+                } else {
+                    if (!succinct_mod.isEnabled()) {
+                        const msg_dr = try std.fmt.allocPrint(allocator, "remove '{s}'\n", .{orig_entry.path});
                         defer allocator.free(msg_dr);
                         try platform_impl.writeStdout(msg_dr);
                     }
-                } else {
-                    const msg_dr = try std.fmt.allocPrint(allocator, "remove '{s}'\n", .{orig_entry.path});
-                    defer allocator.free(msg_dr);
-                    try platform_impl.writeStdout(msg_dr);
                 }
             }
         } else {
@@ -244,7 +248,7 @@ pub fn cmdAdd(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
                     }
                 }
                 // Output add messages only with --ignore-missing (matches git behavior)
-                if (ignore_missing) {
+                if (ignore_missing and !succinct_mod.isEnabled()) {
                     const msg_dr = try std.fmt.allocPrint(allocator, "add '{s}'\n", .{rel_path});
                     defer allocator.free(msg_dr);
                     try platform_impl.writeStdout(msg_dr);
