@@ -82,6 +82,7 @@ const cmd_var = @import("cmd_var.zig");
 const cmd_verify = @import("cmd_verify.zig");
 const cmd_verify_pack = @import("cmd_verify_pack.zig");
 const cmd_web_browse = @import("cmd_web_browse.zig");
+const cmd_workflow = @import("cmd_workflow.zig");
 const cmd_write_tree = @import("cmd_write_tree.zig");
 
 // Already-extracted command modules
@@ -1264,6 +1265,12 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_misc.cmdBugreport(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "diagnose")) {
         try cmd_misc.cmdDiagnose(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "restart")) {
+        try cmd_workflow.cmdRestart(allocator, &args_iter);
+    } else if (std.mem.eql(u8, command, "start")) {
+        try cmd_workflow.cmdStart(allocator, &args_iter);
+    } else if (std.mem.eql(u8, command, "progress")) {
+        try cmd_workflow.cmdProgress(allocator, &args_iter);
     }
 }
 
