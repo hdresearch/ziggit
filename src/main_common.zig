@@ -10,6 +10,7 @@ const network = helpers.network;
 const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Command modules
 const cmd_add = @import("cmd_add.zig");
@@ -167,6 +168,17 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 read_idx += 1;
                 continue;
             }
+            // Handle --succinct / --no-succinct global flags
+            if (std.mem.eql(u8, arg, "--succinct")) {
+                succinct_mod.enabled = true;
+                read_idx += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--no-succinct")) {
+                succinct_mod.enabled = false;
+                read_idx += 1;
+                continue;
+            }
             // Translate newer git flags to older equivalents for git 2.43 compat
             if (std.mem.eql(u8, arg, "-ufalse") or std.mem.eql(u8, arg, "--untracked-files=false") or
                 std.mem.eql(u8, arg, "-u0") or std.mem.eql(u8, arg, "--untracked-files=0")) {
@@ -279,7 +291,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                    std.mem.eql(u8, arg, "--no-optional-locks") or
                    std.mem.eql(u8, arg, "--no-lazy-fetch") or
                    std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--paginate") or
-                   std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--no-pager")) {
+                   std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--no-pager") or
+                   std.mem.eql(u8, arg, "--succinct") or std.mem.eql(u8, arg, "--no-succinct")) {
             // Track pathspec global flags
             if (std.mem.eql(u8, arg, "--glob-pathspecs")) helpers.global_glob_pathspecs = true;
             if (std.mem.eql(u8, arg, "--noglob-pathspecs")) helpers.global_noglob_pathspecs = true;
