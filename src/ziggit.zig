@@ -1012,6 +1012,22 @@ pub const Repository = struct {
             return result;
         }
 
+        // OPTIMIZATION: For pack-only repos (bare repos after clone), skip loose ref
+        // file lookups entirely and go straight to packed-refs hash map (O(1)).
+        if (self._pack_only) {
+            var ref_buf: [256]u8 = undefined;
+            if (committish.len <= 256 - "refs/heads/".len) {
+                const ref_path = std.fmt.bufPrint(&ref_buf, "refs/heads/{s}", .{committish}) catch unreachable;
+                if (self.resolveRefFromPackedRefs(ref_path)) |hash| return hash else |_| {}
+            }
+            if (committish.len <= 256 - "refs/tags/".len) {
+                const tag_path = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{committish}) catch unreachable;
+                if (self.resolveRefFromPackedRefs(tag_path)) |hash| return hash else |_| {}
+            }
+            // Also try HEAD for bare repos
+            return self.revParseHeadUncached() catch error.CommitNotFound;
+        }
+
         // Use resolveRefFast (openat + stack alloc) instead of resolveRef (heap alloc)
         var ref_buf: [256]u8 = undefined;
         if (committish.len <= 256 - "refs/heads/".len) {
