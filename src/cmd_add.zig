@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 const crlf_mod = @import("crlf.zig");
 const check_attr = @import("cmd_check_attr.zig");
 const filter_driver = @import("git/filter_driver.zig");
