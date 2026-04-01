@@ -1563,10 +1563,8 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             const ellipsis: []const u8 = if (subject.len > 72) "..." else "";
             // Get author name
             const a_name = if (author_line) |al| helpers.parseAuthorName(al) else "unknown";
-            // Get relative date
-            const date_str = if (author_line) |al| (helpers.parseAuthorDateRelative(al, allocator) catch null) else null;
-            defer if (date_str) |d| allocator.free(d);
-            const date_display = date_str orelse "";
+            // Get relative date (simplified — no relative date parsing yet)
+            const date_display = "";
             output_buf.clearRetainingCapacity();
             try output_buf.appendSlice(short_hash);
             try output_buf.append(' ');
