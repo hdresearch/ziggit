@@ -159,43 +159,34 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     const cwd = try platform_impl.fs.getCwd(allocator);
     defer allocator.free(cwd);
     
-    // Check status.relativePaths config (default: true)
+    // Read config file ONCE and parse all needed values
     var relative_paths = true;
+    var comment_prefix: []const u8 = "";
+    var show_hints = true;
+    const config_path_once = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+    defer allocator.free(config_path_once);
+    const cfg_data_opt: ?[]const u8 = if (platform_impl.fs.readFile(allocator, config_path_once)) |cfg| cfg else |_| null;
+    defer if (cfg_data_opt) |cfg| allocator.free(cfg);
     {
+        const cfg = cfg_data_opt;
+        // status.relativePaths
         if (helpers.getConfigOverride("status.relativePaths")) |val| {
             if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
                 relative_paths = false;
             }
-        } else {
-            const config_path_rp = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-            defer allocator.free(config_path_rp);
-            if (platform_impl.fs.readFile(allocator, config_path_rp)) |cfg| {
-                defer allocator.free(cfg);
-                if (helpers.parseConfigValue(cfg, "status.relativepaths", allocator) catch null) |val| {
-                    defer allocator.free(val);
-                    if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
-                        relative_paths = false;
-                    }
+        } else if (cfg) |c| {
+            if (helpers.parseConfigValue(c, "status.relativepaths", allocator) catch null) |val| {
+                defer allocator.free(val);
+                if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
+                    relative_paths = false;
                 }
-            } else |_| {}
+            }
         }
-    }
-    
-    const prefix: []const u8 = if (relative_paths and cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/')
-        cwd[repo_root.len + 1 ..]
-    else
-        "";
-
-    // Check status.short and status.branch config (only if not overridden by command line)
-    {
-        const config_path_sb = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path_sb);
-        if (platform_impl.fs.readFile(allocator, config_path_sb)) |cfg| {
-            defer allocator.free(cfg);
+        // status.short
+        if (cfg) |c| {
             if (!short_format and !porcelain and !no_short_explicit) {
-                // Check status.short config
                 const short_val = if (helpers.getConfigOverride("status.short")) |v| v else
-                    (helpers.parseConfigValue(cfg, "status.short", allocator) catch null) orelse null;
+                    (helpers.parseConfigValue(c, "status.short", allocator) catch null) orelse null;
                 if (short_val) |val| {
                     if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
                         short_format = true;
@@ -203,85 +194,70 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                     }
                 }
             }
+            // status.branch
             if (!show_branch and !no_branch_explicit and !porcelain_explicit) {
-                // Check status.branch config (suppressed by --no-branch and --porcelain)
                 const branch_val = if (helpers.getConfigOverride("status.branch")) |v| v else
-                    (helpers.parseConfigValue(cfg, "status.branch", allocator) catch null) orelse null;
+                    (helpers.parseConfigValue(c, "status.branch", allocator) catch null) orelse null;
                 if (branch_val) |val| {
                     if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
                         show_branch = true;
                     }
                 }
             }
+            // status.showStash
             if (!show_stash_explicit) {
-                // Check status.showStash config
                 const stash_val = if (helpers.getConfigOverride("status.showStash")) |v| v else
-                    (helpers.parseConfigValue(cfg, "status.showstash", allocator) catch null) orelse null;
+                    (helpers.parseConfigValue(c, "status.showstash", allocator) catch null) orelse null;
                 if (stash_val) |val| {
                     if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
                         show_stash = true;
                     }
                 }
             }
-        } else |_| {}
-    }
-
-    // helpers.Check config for status.showUntrackedFiles (if not overridden by command line)
-    if (!untracked_explicit) {
-        const config_path_for_ut = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path_for_ut);
-        if (platform_impl.fs.readFile(allocator, config_path_for_ut)) |cfg| {
-            defer allocator.free(cfg);
-            if (helpers.parseConfigValue(cfg, "status.showuntrackedfiles", allocator) catch null) |val| {
-                defer allocator.free(val);
-                if (std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
-                    show_untracked = false;
-                } else if (std.mem.eql(u8, val, "all")) {
-                    untracked_all = true;
-                } else if (std.mem.eql(u8, val, "normal")) {
-                    untracked_all = false;
+        }
+        // status.showUntrackedFiles
+        if (!untracked_explicit) {
+            if (cfg) |c| {
+                if (helpers.parseConfigValue(c, "status.showuntrackedfiles", allocator) catch null) |val| {
+                    defer allocator.free(val);
+                    if (std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "0")) {
+                        show_untracked = false;
+                    } else if (std.mem.eql(u8, val, "all")) {
+                        untracked_all = true;
+                    } else if (std.mem.eql(u8, val, "normal")) {
+                        untracked_all = false;
+                    }
                 }
             }
-        } else |_| {}
-    }
-
-    // Check status.displayCommentPrefix config
-    var comment_prefix: []const u8 = "";
-    {
+        }
+        // status.displayCommentPrefix
         if (helpers.getConfigOverride("status.displayCommentPrefix")) |val| {
             if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
                 comment_prefix = "# ";
             }
-        } else {
-            const config_path_cp = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-            defer allocator.free(config_path_cp);
-            if (platform_impl.fs.readFile(allocator, config_path_cp)) |cfg| {
-                defer allocator.free(cfg);
-                if (helpers.parseConfigValue(cfg, "status.displaycommentprefix", allocator) catch null) |val| {
-                    defer allocator.free(val);
-                    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
-                        comment_prefix = "# ";
-                    }
+        } else if (cfg) |c| {
+            if (helpers.parseConfigValue(c, "status.displaycommentprefix", allocator) catch null) |val| {
+                defer allocator.free(val);
+                if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "1")) {
+                    comment_prefix = "# ";
                 }
-            } else |_| {}
+            }
         }
-    }
-
-    // Check advice.statusHints config
-    var show_hints = true;
-    {
-        const config_path_hints = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-        defer allocator.free(config_path_hints);
-        if (platform_impl.fs.readFile(allocator, config_path_hints)) |cfg| {
-            defer allocator.free(cfg);
-            if (helpers.parseConfigValue(cfg, "advice.statushints", allocator) catch null) |val| {
+        // advice.statusHints
+        if (cfg) |c| {
+            if (helpers.parseConfigValue(c, "advice.statushints", allocator) catch null) |val| {
                 defer allocator.free(val);
                 if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "0")) {
                     show_hints = false;
                 }
             }
-        } else |_| {}
+        }
     }
+    
+    const prefix: []const u8 = if (relative_paths and cwd.len > repo_root.len and std.mem.startsWith(u8, cwd, repo_root) and cwd[repo_root.len] == '/')
+        cwd[repo_root.len + 1 ..]
+    else
+        "";
 
     // helpers.Get current branch
     const current_branch = refs.getCurrentBranch(git_path, platform_impl, allocator) catch try allocator.dupe(u8, "master");
@@ -310,12 +286,9 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             try writeWithCommentPrefix(platform_impl, branch_msg, comment_prefix);
         }
 
-        // Display upstream tracking info natively
+        // Display upstream tracking info natively (reuse already-loaded config)
         if (current_commit != null) upstream_display: {
-            const config_path_track = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
-            defer allocator.free(config_path_track);
-            const cfg = platform_impl.fs.readFile(allocator, config_path_track) catch break :upstream_display;
-            defer allocator.free(cfg);
+            const cfg = cfg_data_opt orelse break :upstream_display;
             const track_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{current_branch});
             defer allocator.free(track_key);
             const remote_val = (helpers.parseConfigValue(cfg, track_key, allocator) catch null) orelse break :upstream_display;
@@ -569,22 +542,8 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         }
     }
 
-    // helpers.Determine helpers.HEAD tree hash for new-file detection
-    var head_tree_hash: ?[]u8 = null;
-    if (current_commit) |cc| {
-        const cobj = objects.GitObject.load(cc, git_path, platform_impl, allocator) catch null;
-        if (cobj) |co| {
-            defer co.deinit(allocator);
-            if (co.type == .commit) {
-                var clines = std.mem.splitSequence(u8, co.data, "\n");
-                if (clines.next()) |tl| {
-                    if (std.mem.startsWith(u8, tl, "tree ")) {
-                        head_tree_hash = allocator.dupe(u8, tl["tree ".len..]) catch null;
-                    }
-                }
-            }
-        }
-    }
+    // Reuse cached_head_tree for new-file detection (avoid duplicate object load)
+    const head_tree_hash: ?[]u8 = if (cached_head_tree) |ht| (allocator.dupe(u8, ht) catch null) else null;
     defer if (head_tree_hash) |h| allocator.free(h);
 
     // helpers.For porcelain output, collect all lines then sort and output together
