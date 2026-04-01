@@ -4,6 +4,7 @@ const git_helpers_mod = @import("../git_helpers.zig");
 
 const std = @import("std");
 const main_common = @import("../main_common.zig");
+const succinct_mod = @import("../succinct.zig");
 const objects = @import("objects.zig");
 const refs = @import("refs.zig");
 const index_mod = @import("index.zig");
@@ -153,6 +154,16 @@ pub fn nativeCmdCherryPick(allocator: std.mem.Allocator, args: [][]const u8, com
         defer allocator.free(new_hash);
         if (!no_commit) {
             try refs.updateHEADCommit(git_path, new_hash, platform_impl, allocator);
+        }
+        
+        // Succinct mode: show success message
+        if (succinct_mod.isEnabled()) {
+            const subject = getCommitSubject(git_path, commit_hash, allocator, platform_impl) catch "";
+            defer if (subject.len > 0) allocator.free(subject);
+            const short_hash = if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash;
+            const msg = try std.fmt.allocPrint(allocator, "ok cherry-pick {s} \"{s}\"\n", .{ short_hash, subject });
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
         }
     }
 }
