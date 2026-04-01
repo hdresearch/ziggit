@@ -767,8 +767,26 @@ fn getCachedFileContent(cache: *std.StringHashMap([]const u8), gp: []const u8, c
     return content;
 }
 
+fn getCachedFileContentWithCommit(cache: *std.StringHashMap([]const u8), gp: []const u8, ch: []const u8, fp2: []const u8, commit_content: []const u8, a2: std.mem.Allocator) ![]const u8 {
+    if (cache.get(ch)) |cached| return cached;
+    const content = try gfFromCommitContent(gp, fp2, commit_content, a2);
+    const key = try a2.dupe(u8, ch);
+    cache.put(key, content) catch {};
+    return content;
+}
+
 fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]const u8 {
     const bh = try git_helpers_mod.getTreeEntryHashFromCommit(gp, ch, fp2, a2);
+    defer a2.free(bh);
+    return try git_helpers_mod.readGitObjectContent(gp, bh, a2);
+}
+
+/// Optimized: extract tree hash from already-loaded commit content, avoiding re-read
+fn gfFromCommitContent(gp: []const u8, fp2: []const u8, commit_content: []const u8, a2: std.mem.Allocator) ![]const u8 {
+    if (!std.mem.startsWith(u8, commit_content, "tree ")) return error.InvalidCommit;
+    const newline = std.mem.indexOf(u8, commit_content, "\n") orelse return error.InvalidCommit;
+    const tree_hash = commit_content[5..newline];
+    const bh = try git_helpers_mod.getTreeEntryHashByPath(gp, tree_hash, fp2, a2);
     defer a2.free(bh);
     return try git_helpers_mod.readGitObjectContent(gp, bh, a2);
 }
@@ -872,7 +890,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 if (l.len == 0) break;
             }
         }
-        const tf = getCachedFileContent(&file_cache, gp, cur.hash, fp2, a) catch {
+        const tf = getCachedFileContentWithCommit(&file_cache, gp, cur.hash, fp2, cc, a) catch {
             for (act.items) |idx| {
                 if (ub[idx]) { B.setEntry(&es[idx], cur.hash, info, a) catch {}; ub[idx] = false; }
             }
@@ -919,7 +937,18 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         @memset(fap, false);
         const pars_to_check = if (first_parent_only and pars.items.len > 1) pars.items[0..1] else pars.items;
         for (pars_to_check) |ph| {
-            const pf = getCachedFileContent(&file_cache, gp, ph, fp2, a) catch continue;
+            // Load parent commit content (cached) and use it to avoid re-reading
+            const parent_cc = blk: {
+                if (commit_cache.get(ph)) |cached| break :blk cached;
+                const pcontent = git_helpers_mod.readGitObjectContent(gp, ph, a) catch break :blk @as(?[]const u8, null);
+                const pkey = a.dupe(u8, ph) catch break :blk @as(?[]const u8, null);
+                commit_cache.put(pkey, pcontent) catch {};
+                break :blk @as(?[]const u8, pcontent);
+            };
+            const pf = if (parent_cc) |pcc|
+                getCachedFileContentWithCommit(&file_cache, gp, ph, fp2, pcc, a) catch continue
+            else
+                getCachedFileContent(&file_cache, gp, ph, fp2, a) catch continue;
             var pl = B.splitLines(a, pf) catch continue;
             defer pl.deinit();
             const t2p = try B.doLcs(a, tls.items, pl.items);
