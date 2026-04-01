@@ -891,6 +891,16 @@ pub fn showWorkingTreeDiff(index: *const index_mod.Index, cwd: []const u8, platf
         
         // helpers.Check if file exists and has changed
         if (platform_impl.fs.exists(full_path) catch false) {
+            // OPTIMIZATION: Fast stat-based skip for unchanged files
+            const file_stat = std.fs.cwd().statFile(full_path) catch null;
+            if (file_stat) |st| {
+                const work_mtime_sec = @as(u32, @intCast(@divTrunc(st.mtime, 1_000_000_000)));
+                const work_size = @as(u32, @intCast(st.size));
+                if (work_mtime_sec == entry.mtime_sec and work_size == entry.size) {
+                    continue; // File unchanged based on stat - skip expensive hash
+                }
+            }
+
             const current_content = platform_impl.fs.readFile(allocator, full_path) catch continue;
             defer allocator.free(current_content);
             
