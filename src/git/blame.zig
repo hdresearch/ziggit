@@ -128,75 +128,133 @@ pub fn doLcs(alloc: std.mem.Allocator, al: []const []const u8, bl: []const []con
     var r = try alloc.alloc(usize, m);
     @memset(r, std.math.maxInt(usize));
     if (m == 0 or n == 0) return r;
-    if (m * n > 10_000_000) {
-        var u = try alloc.alloc(bool, n);
-        defer alloc.free(u);
-        @memset(u, false);
-        for (0..m) |i| {
-            for (0..n) |j| {
-                if (!u[j] and std.mem.eql(u8, al[i], bl[j])) {
-                    r[i] = j;
-                    u[j] = true;
-                    break;
+
+    // Fast path: match common prefix and suffix first
+    var prefix_len: usize = 0;
+    while (prefix_len < m and prefix_len < n and std.mem.eql(u8, al[prefix_len], bl[prefix_len])) {
+        r[prefix_len] = prefix_len;
+        prefix_len += 1;
+    }
+    var suffix_len: usize = 0;
+    while (suffix_len < m - prefix_len and suffix_len < n - prefix_len and
+        std.mem.eql(u8, al[m - 1 - suffix_len], bl[n - 1 - suffix_len]))
+    {
+        r[m - 1 - suffix_len] = n - 1 - suffix_len;
+        suffix_len += 1;
+    }
+
+    // If everything matched via prefix+suffix, we're done
+    if (prefix_len + suffix_len >= m) return r;
+
+    // For the middle section, use hash-based matching
+    const a_start = prefix_len;
+    const a_end = m - suffix_len;
+    const b_start = prefix_len;
+    const b_end = n - suffix_len;
+    const mid_m = a_end - a_start;
+    const mid_n = b_end - b_start;
+
+    // If middle section is small enough, use O(mn) DP for optimal LCS
+    if (mid_m * mid_n <= 500_000) {
+        // Use Hirschberg-style single-row DP + backtrack
+        const dp = try alloc.alloc(usize, (mid_m + 1) * (mid_n + 1));
+        defer alloc.free(dp);
+        @memset(dp, 0);
+        for (1..mid_m + 1) |i| {
+            for (1..mid_n + 1) |j| {
+                if (std.mem.eql(u8, al[a_start + i - 1], bl[b_start + j - 1])) {
+                    dp[i * (mid_n + 1) + j] = dp[(i - 1) * (mid_n + 1) + (j - 1)] + 1;
+                } else if (dp[(i - 1) * (mid_n + 1) + j] >= dp[i * (mid_n + 1) + (j - 1)]) {
+                    dp[i * (mid_n + 1) + j] = dp[(i - 1) * (mid_n + 1) + j];
+                } else {
+                    dp[i * (mid_n + 1) + j] = dp[i * (mid_n + 1) + (j - 1)];
                 }
+            }
+        }
+        // Backtrack to find the actual LCS mapping
+        var i = mid_m;
+        var j = mid_n;
+        while (i > 0 and j > 0) {
+            if (std.mem.eql(u8, al[a_start + i - 1], bl[b_start + j - 1])) {
+                r[a_start + i - 1] = b_start + j - 1;
+                i -= 1;
+                j -= 1;
+            } else if (dp[(i - 1) * (mid_n + 1) + j] >= dp[i * (mid_n + 1) + (j - 1)]) {
+                i -= 1;
+            } else {
+                j -= 1;
             }
         }
         return r;
     }
-    // Compute prefix LCS: dp[i][j] = LCS length of al[0..i] and bl[0..j]
-    const dp = try alloc.alloc(usize, (m + 1) * (n + 1));
-    defer alloc.free(dp);
-    @memset(dp, 0);
-    for (1..m + 1) |i| {
-        for (1..n + 1) |j| {
-            if (std.mem.eql(u8, al[i - 1], bl[j - 1])) {
-                dp[i * (n + 1) + j] = dp[(i - 1) * (n + 1) + (j - 1)] + 1;
-            } else if (dp[(i - 1) * (n + 1) + j] >= dp[i * (n + 1) + (j - 1)]) {
-                dp[i * (n + 1) + j] = dp[(i - 1) * (n + 1) + j];
-            } else {
-                dp[i * (n + 1) + j] = dp[i * (n + 1) + (j - 1)];
+
+    // For large middle sections, use hash-based patience-diff style matching
+    // Build hash map: line content -> positions in B middle section
+    var b_map = std.StringHashMap(std.array_list.Managed(usize)).init(alloc);
+    defer {
+        var vit = b_map.iterator();
+        while (vit.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        b_map.deinit();
+    }
+
+    for (b_start..b_end) |j| {
+        const gop = try b_map.getOrPut(bl[j]);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = std.array_list.Managed(usize).init(alloc);
+        }
+        try gop.value_ptr.append(j);
+    }
+
+    var b_used = try alloc.alloc(bool, n);
+    defer alloc.free(b_used);
+    @memset(b_used, false);
+    for (0..prefix_len) |j| b_used[j] = true;
+    for (0..suffix_len) |s| b_used[n - 1 - s] = true;
+
+    // Count A middle occurrences for patience matching
+    var a_counts = std.StringHashMap(usize).init(alloc);
+    defer a_counts.deinit();
+    for (a_start..a_end) |i| {
+        const gop = try a_counts.getOrPut(al[i]);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
+    }
+
+    // Pass 1: Match unique lines (patience-diff style)
+    for (a_start..a_end) |i| {
+        const a_count = a_counts.get(al[i]) orelse continue;
+        if (a_count != 1) continue;
+        if (b_map.getPtr(al[i])) |positions| {
+            if (positions.items.len != 1) continue;
+            const j = positions.items[0];
+            if (!b_used[j]) {
+                r[i] = j;
+                b_used[j] = true;
             }
         }
     }
-    // Compute suffix LCS: sdp[i][j] = LCS length of al[i..] and bl[j..]
-    const sdp = try alloc.alloc(usize, (m + 1) * (n + 1));
-    defer alloc.free(sdp);
-    @memset(sdp, 0);
-    {
-        var si: usize = m;
-        while (si > 0) : (si -= 1) {
-            var sj: usize = n;
-            while (sj > 0) : (sj -= 1) {
-                if (std.mem.eql(u8, al[si - 1], bl[sj - 1])) {
-                    sdp[(si - 1) * (n + 1) + (sj - 1)] = sdp[si * (n + 1) + sj] + 1;
-                } else if (sdp[si * (n + 1) + (sj - 1)] >= sdp[(si - 1) * (n + 1) + sj]) {
-                    sdp[(si - 1) * (n + 1) + (sj - 1)] = sdp[si * (n + 1) + (sj - 1)];
-                } else {
-                    sdp[(si - 1) * (n + 1) + (sj - 1)] = sdp[(si - 1) * (n + 1) + sj];
-                }
-            }
+
+    // Pass 2: Fill remaining with greedy forward matching
+    var min_j: usize = b_start;
+    for (a_start..a_end) |i| {
+        if (r[i] != std.math.maxInt(usize)) {
+            if (r[i] >= min_j) min_j = r[i] + 1;
+            continue;
         }
-    }
-    const total_lcs = dp[m * (n + 1) + n];
-    // Forward scan: greedily assign earliest possible matches
-    var matched: usize = 0;
-    var j_start: usize = 0;
-    for (0..m) |i| {
-        if (matched >= total_lcs) break;
-        var j: usize = j_start;
-        while (j < n) : (j += 1) {
-            if (std.mem.eql(u8, al[i], bl[j])) {
-                // Check if this match is compatible with an optimal LCS
-                const suffix_remaining = sdp[(i + 1) * (n + 1) + (j + 1)];
-                if (matched + 1 + suffix_remaining >= total_lcs) {
+        if (b_map.getPtr(al[i])) |positions| {
+            for (positions.items) |j| {
+                if (j >= min_j and !b_used[j]) {
                     r[i] = j;
-                    matched += 1;
-                    j_start = j + 1;
+                    b_used[j] = true;
+                    min_j = j + 1;
                     break;
                 }
             }
         }
     }
+
     return r;
 }
 

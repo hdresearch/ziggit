@@ -816,6 +816,16 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         }
         file_cache.deinit();
     }
+    // Cache for commit object content
+    var commit_cache = std.StringHashMap([]const u8).init(a);
+    defer {
+        var it3 = commit_cache.iterator();
+        while (it3.next()) |entry| {
+            a.free(entry.key_ptr.*);
+            a.free(entry.value_ptr.*);
+        }
+        commit_cache.deinit();
+    }
     const QE = struct { hash: []const u8, idx: []usize };
     var q = std.array_list.Managed(QE).init(a);
     defer { for (q.items) |qe| { a.free(qe.hash); a.free(qe.idx); } q.deinit(); }
@@ -834,8 +844,13 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer act.deinit();
         for (cur.idx) |idx| { if (ub[idx]) try act.append(idx); }
         if (act.items.len == 0) continue;
-        const cc = git_helpers_mod.readGitObjectContent(gp, cur.hash, a) catch continue;
-        defer a.free(cc);
+        const cc = blk: {
+            if (commit_cache.get(cur.hash)) |cached| break :blk cached;
+            const content = git_helpers_mod.readGitObjectContent(gp, cur.hash, a) catch continue;
+            const key = a.dupe(u8, cur.hash) catch continue;
+            commit_cache.put(key, content) catch {};
+            break :blk content;
+        };
         const info = B.parseInfo(cc, a) catch continue;
         defer B.freeInfo(info, a);
         var pars = std.array_list.Managed([]const u8).init(a);
