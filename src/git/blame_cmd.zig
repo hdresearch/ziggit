@@ -807,6 +807,14 @@ fn lookupGraftParents(a: std.mem.Allocator, grafts_content: ?[]const u8, commit_
     return null;
 }
 
+/// Get the blob hash for a file path from a commit's tree, using cached commit content
+fn getBlobHashFromCommit(gp: []const u8, commit_content: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]u8 {
+    if (!std.mem.startsWith(u8, commit_content, "tree ")) return error.InvalidCommit;
+    const newline = std.mem.indexOf(u8, commit_content, "\n") orelse return error.InvalidCommit;
+    const tree_hash = commit_content[5..newline];
+    return git_helpers_mod.getTreeEntryHashByPath(gp, tree_hash, fp2, a2);
+}
+
 fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, tl: []const []const u8, es: []B.BlameEntry, wl: ?[]const []const u8, first_parent_only: bool) !void {
     var ub = try a.alloc(bool, tl.len);
     defer a.free(ub);
@@ -842,6 +850,16 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
             a.free(entry.value_ptr.*);
         }
         commit_cache.deinit();
+    }
+    // Cache for blob hashes per commit hash (to skip file loads when blob unchanged)
+    var blob_hash_cache = std.StringHashMap([]const u8).init(a);
+    defer {
+        var it4 = blob_hash_cache.iterator();
+        while (it4.next()) |entry| {
+            a.free(entry.key_ptr.*);
+            a.free(entry.value_ptr.*);
+        }
+        blob_hash_cache.deinit();
     }
     const QE = struct { hash: []const u8, idx: []usize };
     var q = std.array_list.Managed(QE).init(a);
@@ -893,6 +911,14 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 if (l.len == 0) break;
             }
         }
+        // Get blob hash for current commit's file (cached)
+        const cur_blob_hash: ?[]const u8 = blk_bh: {
+            if (blob_hash_cache.get(cur.hash)) |cached| break :blk_bh cached;
+            const bh = getBlobHashFromCommit(gp, cc, fp2, a) catch break :blk_bh null;
+            const bh_key = a.dupe(u8, cur.hash) catch { a.free(bh); break :blk_bh null; };
+            blob_hash_cache.put(bh_key, bh) catch { a.free(bh_key); a.free(bh); break :blk_bh null; };
+            break :blk_bh bh;
+        };
         const tf = getCachedFileContentWithCommit(&file_cache, gp, cur.hash, fp2, cc, a) catch {
             for (act.items) |idx| {
                 if (ub[idx]) { B.setEntry(&es[idx], cur.hash, info, a) catch {}; ub[idx] = false; unblamed_count -= 1; }
@@ -950,13 +976,24 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 commit_cache.put(pkey, pcontent) catch {};
                 break :blk @as(?[]const u8, pcontent);
             };
-            const pf = if (parent_cc) |pcc|
-                getCachedFileContentWithCommit(&file_cache, gp, ph, fp2, pcc, a) catch continue
+            // Fast path: compare blob hashes before loading file content
+            // If blob hash is the same, file content is identical — skip LCS entirely
+            const parent_blob_hash: ?[]const u8 = blk_pbh: {
+                if (blob_hash_cache.get(ph)) |cached| break :blk_pbh cached;
+                if (parent_cc) |pcc| {
+                    const pbh = getBlobHashFromCommit(gp, pcc, fp2, a) catch break :blk_pbh null;
+                    const pbh_key = a.dupe(u8, ph) catch { a.free(pbh); break :blk_pbh null; };
+                    blob_hash_cache.put(pbh_key, pbh) catch { a.free(pbh_key); a.free(pbh); break :blk_pbh null; };
+                    break :blk_pbh pbh;
+                }
+                break :blk_pbh null;
+            };
+            // Ultra-fast path: blob hashes match means identical content
+            const blob_hashes_match = if (cur_blob_hash != null and parent_blob_hash != null)
+                std.mem.eql(u8, cur_blob_hash.?, parent_blob_hash.?)
             else
-                getCachedFileContent(&file_cache, gp, ph, fp2, a) catch continue;
-            // Fast path: if file content is identical between commit and parent,
-            // all lines pass through without needing LCS computation
-            if (std.mem.eql(u8, tf, pf)) {
+                false;
+            if (blob_hashes_match) {
                 var pp = std.array_list.Managed(usize).init(a);
                 defer pp.deinit();
                 for (act.items) |idx| {
@@ -967,6 +1004,27 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 }
                 if (pp.items.len > 0) {
                     try q.append(.{ .hash = try a.dupe(u8, ph), .idx = try a.dupe(usize, pp.items) });
+                }
+                continue;
+            }
+            // Blob hashes differ (or unavailable) — need to load file content and do LCS
+            const pf = if (parent_cc) |pcc|
+                getCachedFileContentWithCommit(&file_cache, gp, ph, fp2, pcc, a) catch continue
+            else
+                getCachedFileContent(&file_cache, gp, ph, fp2, a) catch continue;
+            // Fast path: if file content is identical between commit and parent,
+            // all lines pass through without needing LCS computation
+            if (std.mem.eql(u8, tf, pf)) {
+                var pp2 = std.array_list.Managed(usize).init(a);
+                defer pp2.deinit();
+                for (act.items) |idx| {
+                    if (ub[idx] and !fap[idx]) {
+                        fap[idx] = true;
+                        try pp2.append(idx);
+                    }
+                }
+                if (pp2.items.len > 0) {
+                    try q.append(.{ .hash = try a.dupe(u8, ph), .idx = try a.dupe(usize, pp2.items) });
                 }
                 continue;
             }
