@@ -2692,6 +2692,16 @@ fn doWorkingTreeDiff(allocator: std.mem.Allocator, index: *const index_mod.Index
         var idx_hash_buf: [40]u8 = undefined;
         _ = std.fmt.bufPrint(&idx_hash_buf, "{x}", .{&entry.sha1}) catch continue;
 
+        // OPTIMIZATION: Fast path using stat mtime/size to skip unchanged files
+        // This avoids reading file content and computing SHA-1 for unmodified files
+        const stat_skip = blk: {
+            const file_stat = std.fs.cwd().statFile(entry.path) catch break :blk false;
+            const work_mtime_sec = @as(u32, @intCast(@divTrunc(file_stat.mtime, 1_000_000_000)));
+            const work_size = @as(u32, @intCast(file_stat.size));
+            break :blk (work_mtime_sec == entry.mtime_sec and work_size == entry.size);
+        };
+        if (stat_skip) continue;
+
         // Read working tree file
         const wt_content = pi.fs.readFile(allocator, entry.path) catch {
             // File might be deleted
