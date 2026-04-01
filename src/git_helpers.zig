@@ -13928,6 +13928,28 @@ pub fn parseAuthorDate(author_line: []const u8, allocator: std.mem.Allocator) ?[
 }
 
 
+pub fn parseAuthorDateRelative(author_line: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    // Author line: "Name <email> timestamp timezone"
+    if (std.mem.indexOf(u8, author_line, "> ")) |gt| {
+        const rest = author_line[gt + 2 ..];
+        if (std.mem.indexOf(u8, rest, " ")) |sp| {
+            const ts_str = rest[0..sp];
+            const timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return try allocator.dupe(u8, "");
+            const now = std.time.timestamp();
+            const diff_secs = now - timestamp;
+            if (diff_secs < 0) return try allocator.dupe(u8, "in the future");
+            const d: u64 = @intCast(diff_secs);
+            if (d < 60) return try std.fmt.allocPrint(allocator, "{d} seconds ago", .{d});
+            if (d < 3600) return try std.fmt.allocPrint(allocator, "{d} minutes ago", .{d / 60});
+            if (d < 86400) return try std.fmt.allocPrint(allocator, "{d} hours ago", .{d / 3600});
+            if (d < 86400 * 30) return try std.fmt.allocPrint(allocator, "{d} days ago", .{d / 86400});
+            if (d < 86400 * 365) return try std.fmt.allocPrint(allocator, "{d} months ago", .{d / (86400 * 30)});
+            return try std.fmt.allocPrint(allocator, "{d} years ago", .{d / (86400 * 365)});
+        }
+    }
+    return try allocator.dupe(u8, "");
+}
+
 pub fn formatGitDate(timestamp: i64, tz: []const u8, allocator: std.mem.Allocator) ![]u8 {
     // Git default date format: "Day Mon DD HH:MM:SS YYYY +ZZZZ"
     // Apply timezone offset to get local time
