@@ -854,7 +854,10 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
     }
     var qi: usize = 0;
     var its: usize = 0;
-    while (qi < q.items.len and its < 10000) : (its += 1) {
+    // Track remaining unblamed count for early exit
+    var unblamed_count: usize = 0;
+    for (ub) |u| { if (u) unblamed_count += 1; }
+    while (qi < q.items.len and its < 10000 and unblamed_count > 0) : (its += 1) {
         const cur = q.items[qi];
         qi += 1;
         var act = std.array_list.Managed(usize).init(a);
@@ -892,7 +895,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         }
         const tf = getCachedFileContentWithCommit(&file_cache, gp, cur.hash, fp2, cc, a) catch {
             for (act.items) |idx| {
-                if (ub[idx]) { B.setEntry(&es[idx], cur.hash, info, a) catch {}; ub[idx] = false; }
+                if (ub[idx]) { B.setEntry(&es[idx], cur.hash, info, a) catch {}; ub[idx] = false; unblamed_count -= 1; }
             }
             continue;
         };
@@ -912,6 +915,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                     es[idx].orig_line = t2t[idx] + 1;
                     tree_used2[t2t[idx]] = true;
                     ub[idx] = false;
+                    unblamed_count -= 1;
                 }
             }
             // Second pass: content match for remaining lines
@@ -925,6 +929,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                             es[idx].orig_line = ti + 1;
                             tree_used2[ti] = true;
                             ub[idx] = false;
+                            unblamed_count -= 1;
                             break;
                         }
                     }
@@ -949,6 +954,22 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 getCachedFileContentWithCommit(&file_cache, gp, ph, fp2, pcc, a) catch continue
             else
                 getCachedFileContent(&file_cache, gp, ph, fp2, a) catch continue;
+            // Fast path: if file content is identical between commit and parent,
+            // all lines pass through without needing LCS computation
+            if (std.mem.eql(u8, tf, pf)) {
+                var pp = std.array_list.Managed(usize).init(a);
+                defer pp.deinit();
+                for (act.items) |idx| {
+                    if (ub[idx] and !fap[idx]) {
+                        fap[idx] = true;
+                        try pp.append(idx);
+                    }
+                }
+                if (pp.items.len > 0) {
+                    try q.append(.{ .hash = try a.dupe(u8, ph), .idx = try a.dupe(usize, pp.items) });
+                }
+                continue;
+            }
             var pl = B.splitLines(a, pf) catch continue;
             defer pl.deinit();
             const t2p = try B.doLcs(a, tls.items, pl.items);
@@ -999,6 +1020,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                     es[idx].has_previous = true;
                 }
                 ub[idx] = false;
+                unblamed_count -= 1;
             }
         }
     }
