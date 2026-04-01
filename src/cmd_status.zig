@@ -855,6 +855,109 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 return std.mem.order(u8, a_path, b_path) == .lt;
             }
         }.lessThan);
+
+        // Succinct mode: parse porcelain lines into compact output
+        if (succinct_active) {
+            // Branch line
+            try platform_impl.writeStdout("* ");
+            try platform_impl.writeStdout(current_branch);
+            // Try to show upstream
+            const up_info = helpers.getUpstreamTrackingInfo(git_path, current_branch, allocator, platform_impl);
+            if (up_info) |info| {
+                defer allocator.free(info);
+                try platform_impl.writeStdout("...");
+                try platform_impl.writeStdout(info);
+            }
+            try platform_impl.writeStdout("\n");
+
+            // Categorize porcelain lines
+            var s_staged = std.array_list.Managed([]const u8).init(allocator);
+            defer s_staged.deinit();
+            var s_modified = std.array_list.Managed([]const u8).init(allocator);
+            defer s_modified.deinit();
+            var s_untracked = std.array_list.Managed([]const u8).init(allocator);
+            defer s_untracked.deinit();
+            var s_conflict: usize = 0;
+
+            for (porcelain_lines.items) |line| {
+                if (line.len < 3) continue;
+                const xy0 = line[0];
+                const xy1 = line[1];
+                const path = line[3..];
+                // Conflicts: both modified, added by both, etc.
+                if ((xy0 == 'U') or (xy1 == 'U') or (xy0 == 'A' and xy1 == 'A') or (xy0 == 'D' and xy1 == 'D')) {
+                    s_conflict += 1;
+                } else if (xy0 == '?' and xy1 == '?') {
+                    try s_untracked.append(path);
+                } else {
+                    // Index (staged) changes: first char != ' ' and != '?'
+                    if (xy0 != ' ' and xy0 != '?') {
+                        try s_staged.append(path);
+                    }
+                    // Worktree (unstaged) changes: second char != ' '
+                    if (xy1 != ' ' and xy1 != '?') {
+                        try s_modified.append(path);
+                    }
+                }
+            }
+
+            if (s_conflict > 0) {
+                const cmsg = try std.fmt.allocPrint(allocator, "! Conflicts: {d} files\n", .{s_conflict});
+                defer allocator.free(cmsg);
+                try platform_impl.writeStdout(cmsg);
+            }
+            if (s_staged.items.len > 0) {
+                const smsg = try std.fmt.allocPrint(allocator, "+ Staged: {d} files\n", .{s_staged.items.len});
+                defer allocator.free(smsg);
+                try platform_impl.writeStdout(smsg);
+                const max_show: usize = 15;
+                for (s_staged.items[0..@min(s_staged.items.len, max_show)]) |p| {
+                    try platform_impl.writeStdout("  ");
+                    try platform_impl.writeStdout(p);
+                    try platform_impl.writeStdout("\n");
+                }
+                if (s_staged.items.len > max_show) {
+                    const tmsg = try std.fmt.allocPrint(allocator, "  ... +{d} more\n", .{s_staged.items.len - max_show});
+                    defer allocator.free(tmsg);
+                    try platform_impl.writeStdout(tmsg);
+                }
+            }
+            if (s_modified.items.len > 0) {
+                const mmsg = try std.fmt.allocPrint(allocator, "~ Modified: {d} files\n", .{s_modified.items.len});
+                defer allocator.free(mmsg);
+                try platform_impl.writeStdout(mmsg);
+                const max_show: usize = 15;
+                for (s_modified.items[0..@min(s_modified.items.len, max_show)]) |p| {
+                    try platform_impl.writeStdout("  ");
+                    try platform_impl.writeStdout(p);
+                    try platform_impl.writeStdout("\n");
+                }
+                if (s_modified.items.len > max_show) {
+                    const tmsg = try std.fmt.allocPrint(allocator, "  ... +{d} more\n", .{s_modified.items.len - max_show});
+                    defer allocator.free(tmsg);
+                    try platform_impl.writeStdout(tmsg);
+                }
+            }
+            if (s_untracked.items.len > 0) {
+                const umsg = try std.fmt.allocPrint(allocator, "? Untracked: {d} files\n", .{s_untracked.items.len});
+                defer allocator.free(umsg);
+                try platform_impl.writeStdout(umsg);
+                const max_show: usize = 10;
+                for (s_untracked.items[0..@min(s_untracked.items.len, max_show)]) |p| {
+                    try platform_impl.writeStdout("  ");
+                    try platform_impl.writeStdout(p);
+                    try platform_impl.writeStdout("\n");
+                }
+                if (s_untracked.items.len > max_show) {
+                    const tmsg = try std.fmt.allocPrint(allocator, "  ... +{d} more\n", .{s_untracked.items.len - max_show});
+                    defer allocator.free(tmsg);
+                    try platform_impl.writeStdout(tmsg);
+                }
+            }
+            if (s_staged.items.len == 0 and s_modified.items.len == 0 and s_untracked.items.len == 0 and s_conflict == 0) {
+                try platform_impl.writeStdout("Clean working tree\n");
+            }
+        } else {
         const line_end: []const u8 = if (nul_terminate) "\x00" else "\n";
         const use_rel = !porcelain_explicit and prefix.len > 0;
         for (porcelain_lines.items) |line| {
@@ -871,6 +974,15 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
             try platform_impl.writeStdout(line_end);
         }
+        } // end else (non-succinct porcelain)
+    }
+
+    // Succinct clean tree message
+    if (succinct_active and porcelain_lines.items.len == 0) {
+        try platform_impl.writeStdout("* ");
+        try platform_impl.writeStdout(current_branch);
+        try platform_impl.writeStdout("\n");
+        try platform_impl.writeStdout("Clean working tree\n");
     }
 
     // Final summary message (only in non-porcelain mode)
