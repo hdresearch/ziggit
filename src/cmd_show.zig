@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 const cmd_ls_tree = @import("cmd_ls_tree.zig");
 const cmd_diff_tree = @import("cmd_diff_tree.zig");
 const cmd_show = @import("cmd_show.zig");
