@@ -2972,12 +2972,23 @@ pub const Repository = struct {
     }
 
     fn getCommitTree(self: *Repository, commit_hash: *const [40]u8) ![40]u8 {
-        const raw = try self.readRawObject(commit_hash);
-        defer self._fast_alloc.free(raw);
+        const fa = self._fast_alloc;
 
-        // Parse commit object - look for "tree <hash>" line after null
-        const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse return error.InvalidCommitObject;
-        const commit_content = raw[null_pos + 1 ..];
+        // OPTIMIZATION: Use content-only read (avoids header construction)
+        const commit_content = self.readObjectContentFromPack(commit_hash) catch blk: {
+            // Fallback to full readRawObject
+            const raw = try self.readRawObject(commit_hash);
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidCommitObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(commit_content);
+
+        // Parse commit object - look for "tree <hash>" at start of content
         const tree_prefix = "tree ";
         if (std.mem.startsWith(u8, commit_content, tree_prefix)) {
             if (commit_content.len >= tree_prefix.len + 40) {
@@ -2986,7 +2997,7 @@ pub const Repository = struct {
                 return result;
             }
         }
-        // Also search anywhere in content for robustness
+        // Robustness: search anywhere in content
         if (std.mem.indexOf(u8, commit_content, tree_prefix)) |tree_start| {
             const tree_hash_start = tree_start + tree_prefix.len;
             if (tree_hash_start + 40 <= commit_content.len) {
