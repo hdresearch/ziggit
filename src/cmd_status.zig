@@ -574,10 +574,8 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             for (staged_files.items) |entry| {
                 const is_new = if (current_commit == null)
                     true
-                else if (head_tree_hash) |hth|
-                    (helpers.lookupBlobInTree(hth, entry.path, git_path, platform_impl, allocator) catch null) == null
                 else
-                    false;
+                    !head_tree_map.contains(entry.path);
                 
                 if (is_new) {
                     const qp = try quotePath(allocator, entry.path);
@@ -600,10 +598,8 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             for (staged_files.items) |entry| {
                 const is_new = if (current_commit == null)
                     true
-                else if (head_tree_hash) |hth|
-                    (helpers.lookupBlobInTree(hth, entry.path, git_path, platform_impl, allocator) catch null) == null
                 else
-                    false;
+                    !head_tree_map.contains(entry.path);
                     
                 if (is_new) {
                     const rel_path = try makeRelativePath(allocator, entry.path, prefix);
