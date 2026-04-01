@@ -1093,6 +1093,16 @@ fn pushSingleRefspec(
         defer allocator.free(ref_path);
         if (std.mem.lastIndexOfScalar(u8, ref_path, '/')) |ls| std.fs.cwd().makePath(ref_path[0..ls]) catch {};
 
+        // Check if this will be an actual update (for succinct output)
+        var is_update_for_succinct = true;
+        if (readFileContent(allocator, ref_path)) |existing_content| {
+            defer allocator.free(existing_content);
+            const existing_hash = std.mem.trim(u8, existing_content, " \t\r\n");
+            if (existing_hash.len >= 40 and std.mem.eql(u8, existing_hash[0..40], hash)) {
+                is_update_for_succinct = false; // up-to-date
+            }
+        } else |_| {}
+
         // Check fast-forward / tag update rejection
         if (!force) {
             if (readFileContent(allocator, ref_path)) |old| {
@@ -1129,7 +1139,34 @@ fn pushSingleRefspec(
 
         const data = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
         defer allocator.free(data);
+        
+        // Check if ref is already up-to-date
+        var is_up_to_date = false;
+        if (readFileContent(allocator, ref_path)) |existing_data| {
+            defer allocator.free(existing_data);
+            const existing_hash = std.mem.trim(u8, existing_data, " \t\r\n");
+            if (existing_hash.len >= 40 and std.mem.eql(u8, existing_hash[0..40], hash)) {
+                is_up_to_date = true;
+            }
+        } else |_| {}
+        
         std.fs.cwd().writeFile(.{ .sub_path = ref_path, .data = data }) catch {};
+        
+        // Output success message (succinct mode)
+        if (!is_up_to_date and succinct_mod.isEnabled()) {
+            const branch_name = if (std.mem.startsWith(u8, full_dst, "refs/heads/"))
+                full_dst["refs/heads/".len..]
+            else if (std.mem.startsWith(u8, full_dst, "refs/tags/"))
+                full_dst["refs/tags/".len..]
+            else
+                full_dst;
+            const short_hash = if (hash.len >= 7) hash[0..7] else hash;
+            const success_msg = std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, short_hash }) catch "";
+            if (success_msg.len > 0) {
+                defer allocator.free(success_msg);
+                platform_impl.writeStdout(success_msg) catch {};
+            }
+        }
         
         // Output success message in succinct mode (silent on up-to-date)
         if (succinct_mod.isEnabled() and !was_up_to_date) {
