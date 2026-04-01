@@ -1266,11 +1266,11 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "diagnose")) {
         try cmd_misc.cmdDiagnose(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "restart")) {
-        try cmd_workflow.cmdRestart(allocator, &args_iter);
+        cmd_workflow.cmdRestart(allocator, &args_iter) catch std.process.exit(1);
     } else if (std.mem.eql(u8, command, "start")) {
-        try cmd_workflow.cmdStart(allocator, &args_iter);
+        cmd_workflow.cmdStart(allocator, &args_iter) catch std.process.exit(1);
     } else if (std.mem.eql(u8, command, "progress")) {
-        try cmd_workflow.cmdProgress(allocator, &args_iter);
+        cmd_workflow.cmdProgress(allocator, &args_iter) catch std.process.exit(1);
     }
 }
 
