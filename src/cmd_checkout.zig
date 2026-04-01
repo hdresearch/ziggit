@@ -6,6 +6,7 @@ const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const cmd_remote = @import("cmd_remote.zig");
 const cmd_reflog = @import("cmd_reflog.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -55,6 +56,33 @@ fn applySmudgeFiltersPostCheckout(
         if (smudged) |s| {
             platform_impl.fs.writeFile(full_path, s) catch {};
         }
+    }
+}
+
+/// Write checkout success message, using succinct format when enabled.
+/// Checkout messages in git go to stderr, so in succinct mode we write to stderr too.
+pub fn writeCheckoutSuccess(platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, msg: []const u8) !void {
+    if (succinct_mod.isEnabled()) {
+        // Parse "Switched to a new branch 'X'" or "Switched to branch 'X'" etc.
+        if (std.mem.indexOf(u8, msg, "Switched to")) |_| {
+            if (std.mem.indexOf(u8, msg, "'")) |q1| {
+                if (std.mem.indexOfScalarPos(u8, msg, q1 + 1, '\'')) |q2| {
+                    const branch = msg[q1 + 1 .. q2];
+                    const sm = try std.fmt.allocPrint(allocator, "ok switched to {s}\n", .{branch});
+                    defer allocator.free(sm);
+                    try platform_impl.writeStderr(sm);
+                    return;
+                }
+            }
+        }
+        if (std.mem.indexOf(u8, msg, "Already on")) |_| {
+            try platform_impl.writeStderr("ok\n");
+            return;
+        }
+        // Fallback: just pass through
+        try platform_impl.writeStderr(msg);
+    } else {
+        try platform_impl.writeStderr(msg);
     }
 }
 
