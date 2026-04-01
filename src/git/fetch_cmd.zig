@@ -1824,15 +1824,6 @@ fn performLocalFetch(
         }
         return error.FetchFailed;
     }
-    
-    // Output success summary in succinct mode
-    if (succinct_mod.isEnabled() and updated_refs_count > 0) {
-        const success_msg = std.fmt.allocPrint(allocator, "ok fetch {s} {d} refs\n", .{ remote_name, updated_refs_count }) catch "";
-        if (success_msg.len > 0) {
-            defer allocator.free(success_msg);
-            platform_impl.writeStdout(success_msg) catch {};
-        }
-    }
 
 }
 
