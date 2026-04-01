@@ -7,6 +7,7 @@ const helpers = @import("git_helpers.zig");
 const cmd_ls_tree = @import("cmd_ls_tree.zig");
 const cmd_diff_tree = @import("cmd_diff_tree.zig");
 const cmd_show = @import("cmd_show.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -28,6 +29,14 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("diff: not supported in freestanding mode\n");
         return;
+    }
+
+    // Reset succinct diff tracking
+    succinct_mod.resetDiffTracking();
+    defer {
+        if (succinct_mod.isDiffTruncated()) {
+            platform_impl.writeStdout("[full diff: git diff --no-succinct]\n") catch {};
+        }
     }
 
     // helpers.Collect all args first to check for --no-index

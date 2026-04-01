@@ -305,3 +305,47 @@ pub fn formatOk(allocator: std.mem.Allocator) ![]const u8 {
 pub fn formatOkMsg(allocator: std.mem.Allocator, msg: []const u8) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "ok {s}\n", .{msg});
 }
+
+// ─── Diff output tracking ────────────────────────────────────────────
+
+/// Line counter for succinct diff output truncation.
+var diff_lines_written: usize = 0;
+var diff_truncated: bool = false;
+const diff_max_lines: usize = 500;
+
+pub fn resetDiffTracking() void {
+    diff_lines_written = 0;
+    diff_truncated = false;
+}
+
+pub fn isDiffTruncated() bool {
+    return diff_truncated;
+}
+
+/// Filter diff output for succinct mode. Returns the portion to actually write.
+/// Returns null if the output should be suppressed (already past limit).
+pub fn filterDiffOutput(text: []const u8) ?[]const u8 {
+    if (!isEnabled()) return text;
+    if (diff_truncated) return null;
+
+    // Count lines in this chunk
+    var count: usize = 0;
+    for (text, 0..) |c, i| {
+        if (c == '\n') {
+            count += 1;
+            if (diff_lines_written + count >= diff_max_lines) {
+                diff_truncated = true;
+                return text[0 .. i + 1];
+            }
+        }
+    }
+    diff_lines_written += count;
+    return text;
+}
+
+/// Write text to stdout with succinct diff filtering.
+pub fn writeDiffFiltered(platform_impl: anytype, text: []const u8) !void {
+    if (filterDiffOutput(text)) |filtered| {
+        try platform_impl.writeStdout(filtered);
+    }
+}
