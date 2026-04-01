@@ -306,17 +306,40 @@ pub fn nativeCmdForEachRef(allocator: std.mem.Allocator, args: [][]const u8, com
 
         // helpers.Determine object type
         var obj_type: []const u8 = "commit";
-        if (objects.GitObject.load(entry.hash, git_dir, platform_impl, allocator)) |obj| {
-            obj_type = obj.type.toString();
-            defer obj.deinit(allocator);
+        var obj_data: []const u8 = "";
+        var obj_loaded: ?objects.GitObject = null;
+        defer if (obj_loaded) |ol| ol.deinit(allocator);
 
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj.data, quoting_style, entry.symref_target);
-            defer allocator.free(formatted);
-            if (omit_empty and formatted.len == 0) continue;
-            try out_buf.appendSlice(formatted);
-            try out_buf.append('\n');
-        } else |_| {
-            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, "", quoting_style, entry.symref_target);
+        // Fast path: infer type from ref path to avoid object loading
+        // when the format only needs objectname/objecttype/refname
+        const needs_data = formatNeedsObjectData(format);
+        if (!needs_data) {
+            // For branches, type is always commit
+            if (std.mem.startsWith(u8, entry.name, "refs/heads/") or std.mem.startsWith(u8, entry.name, "refs/remotes/")) {
+                obj_type = "commit";
+            } else {
+                // Use fast type-only lookup (reads pack header without decompression)
+                if (objects.getObjectTypeOnly(entry.hash, git_dir, allocator)) |t| {
+                    obj_type = t.toString();
+                } else {
+                    // Fall back to full load
+                    if (objects.GitObject.load(entry.hash, git_dir, platform_impl, allocator)) |obj| {
+                        obj_loaded = obj;
+                        obj_type = obj.type.toString();
+                        obj_data = obj.data;
+                    } else |_| {}
+                }
+            }
+        } else {
+            if (objects.GitObject.load(entry.hash, git_dir, platform_impl, allocator)) |obj| {
+                obj_loaded = obj;
+                obj_type = obj.type.toString();
+                obj_data = obj.data;
+            } else |_| {}
+        }
+
+        {
+            const formatted = try formatRefOutput(allocator, format, entry.name, entry.hash, obj_type, obj_data, quoting_style, entry.symref_target);
             defer allocator.free(formatted);
             if (omit_empty and formatted.len == 0) continue;
             try out_buf.appendSlice(formatted);
@@ -783,6 +806,40 @@ fn validateTrailerOptions(options: []const u8, allocator: std.mem.Allocator) hel
     return .{ .valid = true };
 }
 
+
+/// Check if a format string requires loading the full object data.
+/// Fields like objectname, objecttype, refname only need the hash and ref info.
+/// Fields like author, committer, subject, body, tree, parent, contents need data.
+fn formatNeedsObjectData(format: []const u8) bool {
+    var idx: usize = 0;
+    while (idx < format.len) {
+        if (format[idx] == '%' and idx + 1 < format.len and format[idx + 1] == '(') {
+            if (std.mem.indexOfScalar(u8, format[idx..], ')')) |close| {
+                const field = format[idx + 2 .. idx + close];
+                // These fields don't need object data
+                if (std.mem.startsWith(u8, field, "refname") or
+                    std.mem.startsWith(u8, field, "objectname") or
+                    std.mem.eql(u8, field, "objecttype") or
+                    std.mem.startsWith(u8, field, "symref") or
+                    std.mem.eql(u8, field, "HEAD") or
+                    std.mem.startsWith(u8, field, "upstream") or
+                    std.mem.startsWith(u8, field, "push") or
+                    std.mem.eql(u8, field, "objectsize") or
+                    std.mem.eql(u8, field, "objectsize:disk") or
+                    std.mem.eql(u8, field, "deltabase") or
+                    std.mem.eql(u8, field, "*deltabase"))
+                {
+                    idx += close + 1;
+                    continue;
+                }
+                // Any other field needs object data
+                return true;
+            }
+        }
+        idx += 1;
+    }
+    return false;
+}
 
 fn refPatternMatchIgnoreCase(name: []const u8, pattern: []const u8) bool {
     // Case-insensitive prefix match (for ref patterns)
