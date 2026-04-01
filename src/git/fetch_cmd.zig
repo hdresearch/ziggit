@@ -1,6 +1,7 @@
 const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const platform_mod = @import("../platform/platform.zig");
+const succinct_mod = @import("../succinct.zig");
 const refs = @import("refs.zig");
 const objects = @import("objects.zig");
 const index_mod = if (@import("builtin").target.os.tag != .freestanding) @import("index.zig") else void;
@@ -964,6 +965,18 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         }
 
         if (local_fetch_failed) std.process.exit(1);
+        
+        // Succinct mode: show fetch success if refs were updated
+        if (succinct_mod.isEnabled() and !quiet) {
+            // Count updated refs (simplified: assume all refspecs contributed)
+            const ref_count = cmd_refspecs.items.len;
+            if (ref_count > 0) {
+                const msg = try std.fmt.allocPrint(allocator, "ok fetch {s} {d} refs\n", .{ remote_name, ref_count });
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+        }
+        
         return;
     }
 
@@ -985,6 +998,14 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
         };
+        
+        // Succinct mode: show fetch success for HTTP fetch
+        if (succinct_mod.isEnabled() and !quiet) {
+            const msg = try std.fmt.allocPrint(allocator, "ok fetch {s} refs\n", .{remote_url});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
+        
         return;
     }
 
@@ -1015,6 +1036,9 @@ fn performLocalFetch(
     do_prune_tags: bool,
     is_named_remote: bool,
 ) !void {
+    // Counter for successfully updated refs (for succinct output)
+    var updated_refs_count: u32 = 0;
+    
     // Resolve source git dir
     const src_git_dir = resolveSourceGitDir(allocator, source_path) catch {
         const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n", .{source_path});
@@ -1394,7 +1418,9 @@ fn performLocalFetch(
                                         fetch_failed = true;
                                         continue;
                                     },
-                                    .success => {},
+                                    .success => {
+                                        updated_refs_count += 1;
+                                    },
                                 }
                             }
 
@@ -1405,9 +1431,12 @@ fn performLocalFetch(
                                 if (old_hash_val) |old_hash| {
                                     if (!std.mem.eql(u8, old_hash, entry.hash)) {
                                         // Updated ref
-                                        const smsg = try std.fmt.allocPrint(allocator, "   {s}..{s}  {s} -> {s}\n", .{ old_hash[0..7], entry.hash[0..7], display_src, display_dst });
-                                        defer allocator.free(smsg);
-                                        try platform_impl.writeStderr(smsg);
+                                        updated_refs_count += 1;
+                                        if (!succinct_mod.isEnabled()) {
+                                            const smsg = try std.fmt.allocPrint(allocator, "   {s}..{s}  {s} -> {s}\n", .{ old_hash[0..7], entry.hash[0..7], display_src, display_dst });
+                                            defer allocator.free(smsg);
+                                            try platform_impl.writeStderr(smsg);
+                                        }
                                     }
                                 } else {
                                     // New ref
@@ -1417,9 +1446,12 @@ fn performLocalFetch(
                                         "new branch"
                                     else
                                         "new ref";
-                                    const smsg = try std.fmt.allocPrint(allocator, " * [{s}]      {s} -> {s}\n", .{ kind, display_src, display_dst });
-                                    defer allocator.free(smsg);
-                                    try platform_impl.writeStderr(smsg);
+                                    updated_refs_count += 1;
+                                    if (!succinct_mod.isEnabled()) {
+                                        const smsg = try std.fmt.allocPrint(allocator, " * [{s}]      {s} -> {s}\n", .{ kind, display_src, display_dst });
+                                        defer allocator.free(smsg);
+                                        try platform_impl.writeStderr(smsg);
+                                    }
                                 }
                             }
                         }
@@ -1508,7 +1540,9 @@ fn performLocalFetch(
                             fetch_failed = true;
                         },
                         .other_error => { fetch_failed = true; },
-                        .success => {},
+                        .success => {
+                            updated_refs_count += 1;
+                        },
                     }
                 }
             }
@@ -1760,11 +1794,14 @@ fn performLocalFetch(
                 }
 
                 // Print status for new tags
-                if (!quiet and tag_is_new) {
-                    const tag_name = entry.name["refs/tags/".len..];
-                    const smsg = try std.fmt.allocPrint(allocator, " * [new tag]         {s} -> {s}\n", .{ tag_name, tag_name });
-                    defer allocator.free(smsg);
-                    try platform_impl.writeStderr(smsg);
+                if (tag_is_new) {
+                    updated_refs_count += 1;
+                    if (!quiet and !succinct_mod.isEnabled()) {
+                        const tag_name = entry.name["refs/tags/".len..];
+                        const smsg = try std.fmt.allocPrint(allocator, " * [new tag]         {s} -> {s}\n", .{ tag_name, tag_name });
+                        defer allocator.free(smsg);
+                        try platform_impl.writeStderr(smsg);
+                    }
                 }
             }
         }
@@ -1777,6 +1814,15 @@ fn performLocalFetch(
             try platform_impl.writeStderr(df_err1);
         }
         return error.FetchFailed;
+    }
+    
+    // Output success summary in succinct mode
+    if (succinct_mod.isEnabled() and updated_refs_count > 0) {
+        const success_msg = std.fmt.allocPrint(allocator, "ok fetch {s} {d} refs\n", .{ remote_name, updated_refs_count }) catch "";
+        if (success_msg.len > 0) {
+            defer allocator.free(success_msg);
+            platform_impl.writeStdout(success_msg) catch {};
+        }
     }
 
 }
@@ -2614,7 +2660,11 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
     // Check if already up to date
     if (std.mem.eql(u8, current_commit, merge_hash)) {
-        try platform_impl.writeStdout("Already up to date.\n");
+        if (succinct_mod.isEnabled()) {
+            try platform_impl.writeStdout("ok pull (up-to-date)\n");
+        } else {
+            try platform_impl.writeStdout("Already up to date.\n");
+        }
         return;
     }
 
@@ -2634,11 +2684,18 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
 
         // Print summary
         if (!quiet) {
-            const from_desc = fetch_head_desc orelse remote;
-            const msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\nFast-forward\n", .{ current_commit[0..7], merge_hash[0..7] });
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
-            _ = from_desc;
+            if (succinct_mod.isEnabled()) {
+                const branch_name = current_branch_opt orelse "HEAD";
+                const msg = try std.fmt.allocPrint(allocator, "ok pull {s}\n", .{branch_name});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            } else {
+                const from_desc = fetch_head_desc orelse remote;
+                const msg = try std.fmt.allocPrint(allocator, "Updating {s}..{s}\nFast-forward\n", .{ current_commit[0..7], merge_hash[0..7] });
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+                _ = from_desc;
+            }
         }
         return;
     }
@@ -2680,7 +2737,13 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
         defer allocator.free(new_hash);
 
         try refs.updateRef(git_path, branch_name, new_hash, platform_impl, allocator);
-        try platform_impl.writeStdout("Merge made by the 'ours' strategy.\n");
+        if (succinct_mod.isEnabled()) {
+            const msg = try std.fmt.allocPrint(allocator, "ok pull {s} (merge)\n", .{branch_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        } else {
+            try platform_impl.writeStdout("Merge made by the 'ours' strategy.\n");
+        }
         return;
     }
 
@@ -2764,7 +2827,13 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     try refs.updateRef(git_path, branch_name, new_hash, platform_impl, allocator);
 
     if (!quiet) {
-        try platform_impl.writeStdout("Merge made by the 'ort' strategy.\n");
+        if (succinct_mod.isEnabled()) {
+            const msg = try std.fmt.allocPrint(allocator, "ok pull {s} (merge)\n", .{branch_name});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        } else {
+            try platform_impl.writeStdout("Merge made by the 'ort' strategy.\n");
+        }
     }
 }
 
