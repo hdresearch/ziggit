@@ -165,6 +165,8 @@ pub fn buildUploadPackRequest(allocator: std.mem.Allocator, wants: []const Oid, 
 pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
     var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
+    // Pre-allocate: ~60 bytes per want/have line + capabilities on first
+    try body.ensureTotalCapacity((wants.len + haves.len) * 60 + 256);
 
     // Include "shallow" and "deepen-since" in capabilities when doing shallow clone
     // "no-progress" suppresses progress messages, reducing response size and parse work
