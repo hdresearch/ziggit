@@ -19,7 +19,7 @@ fn runSubcommand(allocator: std.mem.Allocator, args: []const []const u8) RunErro
     const self_exe = std.fs.selfExePath(&exe_buf) catch return RunError.SelfExeNotFound;
 
     // Build argv: [self_exe] ++ args
-    var argv_list = allocator.alloc([]const u8, args.len + 1) catch return RunError.OutOfMemory;
+    const argv_list = allocator.alloc([]const u8, args.len + 1) catch return RunError.OutOfMemory;
     defer allocator.free(argv_list);
     argv_list[0] = self_exe;
     for (args, 0..) |a, i| {
@@ -40,6 +40,43 @@ fn runSubcommand(allocator: std.mem.Allocator, args: []const []const u8) RunErro
     }
 }
 
+/// Run a subcommand capturing stdout. Returns true if it produced output.
+/// On non-zero exit, returns SubcommandFailed.
+fn runSubcommandHasOutput(allocator: std.mem.Allocator, args: []const []const u8) RunError!bool {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const self_exe = std.fs.selfExePath(&exe_buf) catch return RunError.SelfExeNotFound;
+
+    const argv_list = allocator.alloc([]const u8, args.len + 1) catch return RunError.OutOfMemory;
+    defer allocator.free(argv_list);
+    argv_list[0] = self_exe;
+    for (args, 0..) |a, i| {
+        argv_list[i + 1] = a;
+    }
+
+    var child = std.process.Child.init(argv_list, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+
+    child.spawn() catch return RunError.SubcommandFailed;
+    // Read stdout to check if there's output
+    var buf: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (true) {
+        const n = child.stdout.?.read(&buf) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    const term = child.wait() catch return RunError.SubcommandFailed;
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) return RunError.SubcommandFailed;
+        },
+        else => return RunError.SubcommandFailed,
+    }
+    return total > 0;
+}
+
 /// Detect the default branch by reading origin/HEAD, then checking for
 /// origin/main or origin/master refs. Falls back to "main".
 fn detectDefaultBranch() []const u8 {
@@ -53,11 +90,9 @@ fn detectDefaultBranch() []const u8 {
         const prefix = "ref: refs/remotes/origin/";
         if (std.mem.startsWith(u8, content, prefix)) {
             const branch_name = content[prefix.len..];
-            // Return string literals to avoid dangling stack pointer
             if (std.mem.eql(u8, branch_name, "master")) return "master";
             if (std.mem.eql(u8, branch_name, "main")) return "main";
             if (std.mem.eql(u8, branch_name, "develop")) return "develop";
-            // For unknown branch names, fall through to ref file check
         }
     } else |_| {}
 
@@ -96,16 +131,16 @@ pub fn cmdRestart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIter
 pub fn cmdStart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIterator) !void {
     const branch = args_iter.next() orelse detectDefaultBranch();
 
-    // add -A (ignore failure — nothing to add is fine)
-    runSubcommand(allocator, &.{ "add", "-A" }) catch {};
+    // Check if there are local changes using status --porcelain
+    const has_changes = runSubcommandHasOutput(allocator, &.{ "status", "--porcelain" }) catch false;
 
-    // Try stash
-    const had_stash = blk: {
-        runSubcommand(allocator, &.{"stash"}) catch {
-            break :blk false;
-        };
-        break :blk true;
-    };
+    var had_stash = false;
+    if (has_changes) {
+        // add -A then stash
+        runSubcommand(allocator, &.{ "add", "-A" }) catch {};
+        runSubcommand(allocator, &.{"stash"}) catch {};
+        had_stash = true;
+    }
 
     // restart
     runSubcommand(allocator, &.{ "restart", branch }) catch |e| {
@@ -142,7 +177,7 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
 
     // commit -m "DESCRIPTION"
     runSubcommand(allocator, &.{ "commit", "-m", message }) catch |e| {
-        printErr(allocator, "FAILED: commit (nothing to commit, or pre-commit hook?)\n", .{});
+        printErr(allocator, "FAILED: commit (nothing to commit?)\n", .{});
         return e;
     };
 
@@ -155,7 +190,8 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
     // restart (detect default branch since progress doesn't take a branch arg)
     const branch = detectDefaultBranch();
     runSubcommand(allocator, &.{ "restart", branch }) catch |e| {
-        printErr(allocator, "FAILED: restart after push (commit+push succeeded)\n", .{});
+        printErr(allocator, "note: commit+push succeeded, but post-push restart failed\n", .{});
+        printErr(allocator, "FAILED: restart after push\n", .{});
         return e;
     };
 
