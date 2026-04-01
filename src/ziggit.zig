@@ -49,13 +49,16 @@ pub const Repository = struct {
     _cached_git_dir_fd: ?std.posix.fd_t = null,
     // PACKED-REFS CACHE: Avoid re-reading packed-refs for every ref lookup
     _cached_packed_refs: ?[]const u8 = null,
+    // PACKED-REFS HASH MAP: O(1) ref lookup instead of linear scan
+    _cached_packed_refs_map: ?std.StringHashMap([40]u8) = null,
     // PACK-ONLY FLAG: When true, skip loose object lookups (all objects are in packs)
     _pack_only: bool = false,
     // Delta base cache: caches recently decompressed base objects for delta chains
     // Key: pack offset, Value: raw decompressed object with header
-    _delta_cache_offsets: [16]u64 = [_]u64{0} ** 16,
-    _delta_cache_data: [16]?[]u8 = [_]?[]u8{null} ** 16,
-    _delta_cache_next: u4 = 0,
+    // 64 entries for better hit rate during checkout of repos with deep delta chains
+    _delta_cache_offsets: [64]u64 = [_]u64{0} ** 64,
+    _delta_cache_data: [64]?[]u8 = [_]?[]u8{null} ** 64,
+    _delta_cache_next: u6 = 0,
 
     /// Open an existing repository at the specified path
     /// Open a bare repository without any warmup or HEAD validation.
@@ -84,6 +87,9 @@ pub const Repository = struct {
         if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
             repo._cached_git_dir_fd = dir.fd;
         } else |_| {}
+
+        // Pre-warm pack/idx mmap cache — eliminates directory scan on first object lookup
+        repo.prewarmPackCache() catch {};
 
         return repo;
     }
@@ -180,14 +186,77 @@ pub const Repository = struct {
             self.allocator.free(d);
         }
         if (self._cached_pack_path) |p| self.allocator.free(p);
+        if (self._cached_packed_refs_map) |*map| {
+            var m = map.*;
+            m.deinit();
+        }
         if (self._cached_packed_refs) |pr| self.allocator.free(pr);
-        for (&self._delta_cache_data) |*entry| {
-            if (entry.*) |data| self._fast_alloc.free(data);
+        for (&self._delta_cache_data) |*d_entry| {
+            if (d_entry.*) |data| self._fast_alloc.free(data);
         }
         self.allocator.free(self.path);
         self.allocator.free(self.git_dir);
     }
     
+    /// Pre-warm pack/idx mmap cache by finding and mmapping the first pack+idx pair.
+    /// This eliminates the directory scan on the first object lookup.
+    fn prewarmPackCache(self: *Repository) !void {
+        if (self._cached_pack_data != null) return; // already warmed
+
+        var pack_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const pack_dir_path = std.fmt.bufPrint(&pack_dir_buf, "{s}/objects/pack", .{self.git_dir}) catch return;
+
+        var pack_dir = std.fs.openDirAbsolute(pack_dir_path, .{ .iterate = true }) catch return;
+        defer pack_dir.close();
+
+        var iter = pack_dir.iterate();
+        while (iter.next() catch return) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
+
+            // Load idx via mmap
+            const idx_file = pack_dir.openFile(entry.name, .{}) catch continue;
+            const idx_stat = idx_file.stat() catch { idx_file.close(); continue; };
+            if (idx_stat.size < 1028) { idx_file.close(); continue; }
+            const idx_mmap = std.posix.mmap(null, idx_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, idx_file.handle, 0) catch {
+                idx_file.close();
+                continue;
+            };
+            idx_file.close();
+
+            // Load corresponding pack via mmap
+            var pack_name_buf: [256]u8 = undefined;
+            const pack_name = std.fmt.bufPrint(&pack_name_buf, "{s}.pack", .{entry.name[0 .. entry.name.len - 4]}) catch {
+                std.posix.munmap(idx_mmap);
+                continue;
+            };
+
+            const pack_file = pack_dir.openFile(pack_name, .{}) catch {
+                std.posix.munmap(idx_mmap);
+                continue;
+            };
+            const pack_stat = pack_file.stat() catch { pack_file.close(); std.posix.munmap(idx_mmap); continue; };
+            const pack_mmap = std.posix.mmap(null, pack_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, pack_file.handle, 0) catch {
+                pack_file.close();
+                std.posix.munmap(idx_mmap);
+                continue;
+            };
+            pack_file.close();
+
+            self._cached_pack_mmap = pack_mmap;
+            self._cached_pack_data = pack_mmap[0..pack_stat.size];
+            self._cached_idx_mmap = idx_mmap;
+            self._cached_idx_data = idx_mmap[0..idx_stat.size];
+
+            // Tell kernel we'll need these pages soon
+            if (comptime @import("builtin").os.tag == .linux) {
+                std.posix.madvise(@ptrCast(pack_mmap.ptr), pack_mmap.len, std.posix.MADV.WILLNEED) catch {};
+                std.posix.madvise(@ptrCast(idx_mmap.ptr), idx_mmap.len, std.posix.MADV.WILLNEED) catch {};
+            }
+            return; // Only cache the first (usually only) pack
+        }
+    }
+
     /// Get or open a cached directory handle for the git dir (for openat()-based access)
     fn getGitDirFd(self: *Repository) !std.posix.fd_t {
         if (self._cached_git_dir_fd) |fd| return fd;
@@ -1892,11 +1961,20 @@ pub const Repository = struct {
 
         const path = try allocator.dupe(u8, target);
 
-        return Repository{
+        var repo = Repository{
             .path = path,
             .git_dir = git_dir,
             .allocator = allocator,
+            ._pack_only = true,
         };
+
+        // Pre-warm pack cache for immediate findCommit/checkout use
+        if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
+        repo.prewarmPackCache() catch {};
+
+        return repo;
     }
 
     /// Clone from HTTPS URL into a bare repository with shallow depth support.
@@ -2309,13 +2387,79 @@ pub const Repository = struct {
         };
 
         const target_git_dir = try std.fmt.allocPrint(allocator, "{s}/.git", .{target});
-        try copyDirectory(source_git_dir, target_git_dir);
+        errdefer allocator.free(target_git_dir);
 
-        return Repository{
+        // OPTIMIZATION: Create minimal .git structure with hardlinks to pack/idx files
+        // instead of copying the entire bare repo directory tree.
+        // This is much faster for bun's use case where we only need to checkout.
+        cloneNoCheckoutFastLocal(allocator, source_git_dir, target_git_dir) catch {
+            // Fallback to full directory copy
+            try copyDirectory(source_git_dir, target_git_dir);
+        };
+
+        var repo = Repository{
             .path = try allocator.dupe(u8, target),
             .git_dir = target_git_dir,
             .allocator = allocator,
+            ._pack_only = true,
         };
+
+        // Pre-warm pack cache for fast checkout
+        repo.prewarmPackCache() catch {};
+
+        // Cache git dir fd
+        if (std.fs.openDirAbsolute(target_git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
+
+        return repo;
+    }
+
+    /// Fast local clone: create minimal .git structure with hardlinks to pack/idx files.
+    /// Copies only HEAD, packed-refs, config, and refs/; hardlinks objects/pack/* files.
+    fn cloneNoCheckoutFastLocal(_: std.mem.Allocator, source_git_dir: []const u8, target_git_dir: []const u8) !void {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf2: [std.fs.max_path_bytes]u8 = undefined;
+
+        // Create directory structure
+        const dirs = [_][]const u8{ "", "objects", "objects/pack", "refs", "refs/heads", "refs/tags" };
+        for (dirs) |d| {
+            const dir_path = if (d.len == 0)
+                std.fmt.bufPrint(&path_buf, "{s}", .{target_git_dir}) catch continue
+            else
+                std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ target_git_dir, d }) catch continue;
+            std.fs.cwd().makePath(dir_path) catch {};
+        }
+
+        // Copy small files: HEAD, config, packed-refs
+        const small_files = [_][]const u8{ "HEAD", "config", "packed-refs" };
+        for (small_files) |name| {
+            const src = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ source_git_dir, name }) catch continue;
+            const dst = std.fmt.bufPrint(&path_buf2, "{s}/{s}", .{ target_git_dir, name }) catch continue;
+            copyFileZeroCopy(src, dst) catch continue;
+        }
+
+        // Hardlink pack/idx files (these are the big ones)
+        const pack_src = std.fmt.bufPrint(&path_buf, "{s}/objects/pack", .{source_git_dir}) catch return error.PathTooLong;
+        var pack_dir = std.fs.openDirAbsolute(pack_src, .{ .iterate = true }) catch return;
+        defer pack_dir.close();
+
+        var iter = pack_dir.iterate();
+        while (iter.next() catch return) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".pack") and !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+
+            const src_path = std.fmt.bufPrint(&path_buf, "{s}/objects/pack/{s}", .{ source_git_dir, entry.name }) catch continue;
+            const dst_path = std.fmt.bufPrint(&path_buf2, "{s}/objects/pack/{s}", .{ target_git_dir, entry.name }) catch continue;
+            hardlinkFile(src_path, dst_path) catch {
+                copyFileZeroCopy(src_path, dst_path) catch continue;
+            };
+        }
+
+        // Copy refs directory (small files)
+        const refs_src = std.fmt.bufPrint(&path_buf, "{s}/refs", .{source_git_dir}) catch return error.PathTooLong;
+        const refs_dst = std.fmt.bufPrint(&path_buf2, "{s}/refs", .{target_git_dir}) catch return error.PathTooLong;
+        copyDirectoryImpl(refs_src, refs_dst, true) catch {};
     }
 
     // Private helper methods
@@ -3461,52 +3605,56 @@ pub const Repository = struct {
         return self.resolveRefFromPackedRefs(ref_name);
     }
 
-    /// Resolve a ref by scanning the packed-refs file.
-    /// packed-refs format: "<hash> <refname>\n" per line, with comment lines starting with '#'.
+    /// Resolve a ref by looking up the packed-refs hash map.
+    /// On first call, reads packed-refs and builds a hash map for O(1) lookups.
     fn resolveRefFromPackedRefs(self: *const Repository, ref_name: []const u8) ![40]u8 {
-        // Use cached packed-refs content if available
-        const content = if (self._cached_packed_refs) |cached|
-            cached
-        else blk: {
-            const packed_file = blk2: {
-                if (self._cached_git_dir_fd) |dir_fd| {
-                    const dir = std.fs.Dir{ .fd = dir_fd };
-                    break :blk2 dir.openFile("packed-refs", .{}) catch return error.RefNotFound;
-                }
-                var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
-                break :blk2 std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+        const self_mut = @as(*Repository, @constCast(self));
+
+        // Build hash map on first access
+        if (self._cached_packed_refs_map == null) {
+            // Read packed-refs content
+            const content = if (self._cached_packed_refs) |cached|
+                cached
+            else blk: {
+                const packed_file = blk2: {
+                    if (self._cached_git_dir_fd) |dir_fd| {
+                        const dir = std.fs.Dir{ .fd = dir_fd };
+                        break :blk2 dir.openFile("packed-refs", .{}) catch return error.RefNotFound;
+                    }
+                    var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return error.RefNotFound;
+                    break :blk2 std.fs.openFileAbsolute(packed_path, .{}) catch return error.RefNotFound;
+                };
+                defer packed_file.close();
+                const data = packed_file.readToEndAlloc(self.allocator, 4 * 1024 * 1024) catch return error.RefNotFound;
+                self_mut._cached_packed_refs = data;
+                break :blk data;
             };
-            defer packed_file.close();
-            // Read and cache packed-refs (typically < 64KB)
-            const data = packed_file.readToEndAlloc(self.allocator, 4 * 1024 * 1024) catch return error.RefNotFound;
-            // Cache it (cast away const for mutable self)
-            const self_mut = @as(*Repository, @constCast(self));
-            self_mut._cached_packed_refs = data;
-            break :blk data;
-        };
 
-        var remaining: []const u8 = content;
-        while (remaining.len > 0) {
-            // Find end of line
-            const line_end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
-            const line = remaining[0..line_end];
-            remaining = if (line_end < remaining.len) remaining[line_end + 1 ..] else remaining[remaining.len..];
+            // Parse into hash map
+            var map = std.StringHashMap([40]u8).init(self.allocator);
+            var remaining: []const u8 = content;
+            while (remaining.len > 0) {
+                const line_end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
+                const line = remaining[0..line_end];
+                remaining = if (line_end < remaining.len) remaining[line_end + 1 ..] else remaining[remaining.len..];
 
-            // Skip comments and peeled entries (^hash)
-            if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                if (line.len < 42 or line[0] == '#' or line[0] == '^') continue;
+                if (line[40] != ' ') continue;
 
-            // Format: "<40-char-hash> <refname>"
-            if (line.len < 42) continue; // 40 hash + space + at least 1 char ref
-            if (line[40] != ' ') continue;
-
-            const line_ref = line[41..];
-            if (std.mem.eql(u8, line_ref, ref_name)) {
+                const line_ref = line[41..];
                 if (isValidHex(line[0..40])) {
-                    var result: [40]u8 = undefined;
-                    @memcpy(&result, line[0..40]);
-                    return result;
+                    // Keys point into cached packed-refs content (no alloc needed)
+                    map.put(line_ref, line[0..40].*) catch continue;
                 }
+            }
+            self_mut._cached_packed_refs_map = map;
+        }
+
+        // O(1) lookup
+        if (self._cached_packed_refs_map) |map| {
+            if (map.get(ref_name)) |hash| {
+                return hash;
             }
         }
 
