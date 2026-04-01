@@ -444,6 +444,11 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
         group_sizes[gi] = gs;
     }
 
+    // Use a single output buffer to minimize syscalls
+    var out_buf = std.array_list.Managed(u8).init(a);
+    defer out_buf.deinit();
+    try out_buf.ensureTotalCapacity(oi.items.len * 80);
+
     if (incremental) {
         // Incremental output: group consecutive lines from same commit, output header per group
         var idx: usize = 0;
@@ -457,26 +462,17 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                 oi.items[idx] == oi.items[idx - 1] + 1) : (idx += 1) {}
             const count = idx - start_idx;
             const orig_ln = if (e.orig_line > 0) e.orig_line else start_ln;
-            // Output header
-            const hdr = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, start_ln, count });
-            defer a.free(hdr);
-            try pi.writeStdout(hdr);
-            // Author info
-            const ab = try std.fmt.allocPrint(a, "author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
+            var w = out_buf.writer();
+            try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, start_ln, count });
+            try w.print("author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
                 e.author_name, e.author_email, e.author_time, e.author_tz,
                 e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary,
             });
-            defer a.free(ab);
-            try pi.writeStdout(ab);
             if (e.has_previous) {
-                const pv = try std.fmt.allocPrint(a, "previous {s} {s}\n", .{ &e.previous_hash, fp.? });
-                defer a.free(pv);
-                try pi.writeStdout(pv);
+                try w.print("previous {s} {s}\n", .{ &e.previous_hash, fp.? });
             }
-            if (e.is_boundary) try pi.writeStdout("boundary\n");
-            const fl = try std.fmt.allocPrint(a, "filename {s}\n", .{fp.?});
-            defer a.free(fl);
-            try pi.writeStdout(fl);
+            if (e.is_boundary) try out_buf.appendSlice("boundary\n");
+            try w.print("filename {s}\n", .{fp.?});
         }
     } else {
         for (oi.items, 0..) |i, oi_idx| {
@@ -485,11 +481,14 @@ pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platf
                 const first_time = !seen_hashes.contains(&e.commit_hash);
                 if (first_time) seen_hashes.put(&e.commit_hash, {}) catch {};
                 const is_group_start = group_sizes[oi_idx] > 0;
-                try oP(pi, a, e, line, ln, first_time or slp, fp.?, is_group_start, if (is_group_start) group_sizes[oi_idx] else 0);
+                try oPBuf(&out_buf, e, line, ln, first_time or slp, fp.?, is_group_start, if (is_group_start) group_sizes[oi_idx] else 0);
             }
-            else if (col) { try oC(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
-            else { try oD(pi, a, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
+            else if (col) { try oCBuf(&out_buf, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
+            else { try oDBuf(&out_buf, e, line, ln, se, srt, mal, lnw, abl, suppress, blank_boundary); }
         }
+    }
+    if (out_buf.items.len > 0) {
+        try pi.writeStdout(out_buf.items);
     }
 }
 
@@ -976,127 +975,153 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
     }
 }
 
-fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
+fn oCBuf(buf: *std.array_list.Managed(u8), e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
     const effective_abl = @min(abl2 + 1, 40);
-    const hash_str = blk: {
-        if (bb2 and e.is_boundary) {
-            // blank boundary: spaces instead of hash
-            const spaces = try a.alloc(u8, effective_abl);
-            @memset(spaces, ' ');
-            break :blk spaces;
-        } else {
-            break :blk try a.dupe(u8, e.commit_hash[0..effective_abl]);
-        }
-    };
-    defer a.free(hash_str);
-    if (suppress2) {
-        const pnum = try B.padN(a, ln, lnw2);
-        defer a.free(pnum);
-        const out = try std.fmt.allocPrint(a, "{s}\t{s}){s}\n", .{ hash_str, pnum, line });
-        defer a.free(out);
-        try so.writeStdout(out);
+    var w = buf.writer();
+    if (bb2 and e.is_boundary) {
+        try w.writeByteNTimes(' ', effective_abl);
     } else {
-        const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
-        defer a.free(dn);
-        // Use at least dn.len + 1 to ensure a space before the author name (for awk parsing)
-        const pn = try B.padR(a, dn, @max(mal2, dn.len + 1));
-        defer a.free(pn);
-        const ds = if (srt2) try std.fmt.allocPrint(a, "{d} {s}", .{ e.author_time, e.author_tz }) else try B.fmtTs(a, e.author_time, e.author_tz);
-        defer a.free(ds);
-        const pnum = try B.padN(a, ln, lnw2);
-        defer a.free(pnum);
-        const out = try std.fmt.allocPrint(a, "{s}\t({s}\t{s}\t{s}){s}\n", .{ hash_str, pn, ds, pnum, line });
-        defer a.free(out);
-        try so.writeStdout(out);
+        try w.writeAll(e.commit_hash[0..effective_abl]);
+    }
+    if (suppress2) {
+        try w.writeByte('\t');
+        try writePadN(w, ln, lnw2);
+        try w.writeByte(')');
+        try w.writeAll(line);
+        try w.writeByte('\n');
+    } else {
+        try w.writeAll("\t(");
+        const dn_len = if (se2) e.author_email.len + 2 else e.author_name.len;
+        const pad_w = @max(mal2, dn_len + 1);
+        if (pad_w > dn_len) try w.writeByteNTimes(' ', pad_w - dn_len);
+        if (se2) { try w.writeByte('<'); try w.writeAll(e.author_email); try w.writeByte('>'); } else try w.writeAll(e.author_name);
+        try w.writeByte('\t');
+        if (srt2) { try w.print("{d} {s}", .{ e.author_time, e.author_tz }); } else try writeFmtTs(w, e.author_time, e.author_tz);
+        try w.writeByte('\t');
+        try writePadN(w, ln, lnw2);
+        try w.writeByte(')');
+        try w.writeAll(line);
+        try w.writeByte('\n');
     }
 }
 
-fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
-    // Total visual width for hash field is min(abl2+1, 40) chars
-    // Hash display rules:
-    // Non-boundary: min(abbrev+1, 40) hex chars
-    // Boundary: ^HASH where HASH = min(abbrev+1, 40) - 1 hex chars
-    // Exception: when abbrev > 40, show full 40 hex (non-boundary) or ^+40 hex (boundary)
+fn oDBuf(buf: *std.array_list.Managed(u8), e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
     const field_width: usize = if (abl2 > 40) 40 else @min(abl2 + 1, 40);
     const boundary_total: usize = if (abl2 > 40) 41 else field_width;
-    const hash_str = blk: {
-        if (bb2 and e.is_boundary) {
-            // -b: blank boundary - spaces matching boundary display width
-            const spaces = try a.alloc(u8, field_width);
-            @memset(spaces, ' ');
-            break :blk spaces;
-        } else if (e.is_boundary) {
-            // ^hash format
-            const hex_count = boundary_total - 1;
-            break :blk try std.fmt.allocPrint(a, "^{s}", .{e.commit_hash[0..hex_count]});
-        } else {
-            // non-boundary: field_width hex chars
-            break :blk try std.fmt.allocPrint(a, "{s}", .{e.commit_hash[0..field_width]});
-        }
-    };
-    defer a.free(hash_str);
-    if (suppress2) {
-        const pnum = try B.padN(a, ln, lnw2);
-        defer a.free(pnum);
-        const out = try std.fmt.allocPrint(a, "{s} {s}) {s}\n", .{ hash_str, pnum, line });
-        defer a.free(out);
-        try so.writeStdout(out);
+    var w = buf.writer();
+    if (bb2 and e.is_boundary) {
+        try w.writeByteNTimes(' ', field_width);
+    } else if (e.is_boundary) {
+        try w.writeByte('^');
+        try w.writeAll(e.commit_hash[0 .. boundary_total - 1]);
     } else {
-        const dn = if (se2) try std.fmt.allocPrint(a, "<{s}>", .{e.author_email}) else try a.dupe(u8, e.author_name);
-        defer a.free(dn);
-        const pn = try B.padR(a, dn, mal2);
-        defer a.free(pn);
-        const ds = try B.fmtTs(a, e.author_time, e.author_tz);
-        defer a.free(ds);
-        const pnum = try B.padN(a, ln, lnw2);
-        defer a.free(pnum);
-        const out = try std.fmt.allocPrint(a, "{s} ({s} {s} {s}) {s}\n", .{ hash_str, pn, ds, pnum, line });
-        defer a.free(out);
-        try so.writeStdout(out);
+        try w.writeAll(e.commit_hash[0..field_width]);
+    }
+    if (suppress2) {
+        try w.writeByte(' ');
+        try writePadN(w, ln, lnw2);
+        try w.writeAll(") ");
+        try w.writeAll(line);
+        try w.writeByte('\n');
+    } else {
+        try w.writeAll(" (");
+        const dn_len = if (se2) e.author_email.len + 2 else e.author_name.len;
+        if (mal2 > dn_len) try w.writeByteNTimes(' ', mal2 - dn_len);
+        if (se2) { try w.writeByte('<'); try w.writeAll(e.author_email); try w.writeByte('>'); } else try w.writeAll(e.author_name);
+        try w.writeByte(' ');
+        try writeFmtTs(w, e.author_time, e.author_tz);
+        try w.writeByte(' ');
+        try writePadN(w, ln, lnw2);
+        try w.writeAll(") ");
+        try w.writeAll(line);
+        try w.writeByte('\n');
     }
 }
 
-fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start2: bool, group_size2: usize) !void {
+fn oPBuf(buf: *std.array_list.Managed(u8), e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start2: bool, group_size2: usize) !void {
     const orig_ln = if (e.orig_line > 0) e.orig_line else ln;
+    var w = buf.writer();
     if (sh2) {
-        // Full header (first time hash seen or --line-porcelain)
         if (is_group_start2) {
-            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
-            defer a.free(h1);
-            try so.writeStdout(h1);
+            try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
         } else {
-            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
-            defer a.free(h1);
-            try so.writeStdout(h1);
+            try w.print("{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
         }
-        const ab = try std.fmt.allocPrint(a, "author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
+        try w.print("author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
             e.author_name, e.author_email, e.author_time, e.author_tz,
             e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary,
         });
-        defer a.free(ab);
-        try so.writeStdout(ab);
         if (e.has_previous) {
-            const pv = try std.fmt.allocPrint(a, "previous {s} {s}\n", .{ &e.previous_hash, fp2 });
-            defer a.free(pv);
-            try so.writeStdout(pv);
+            try w.print("previous {s} {s}\n", .{ &e.previous_hash, fp2 });
         }
-        if (e.is_boundary) try so.writeStdout("boundary\n");
-        const fl = try std.fmt.allocPrint(a, "filename {s}\n", .{fp2});
-        defer a.free(fl);
-        try so.writeStdout(fl);
+        if (e.is_boundary) try buf.appendSlice("boundary\n");
+        try w.print("filename {s}\n", .{fp2});
     } else {
-        // Continuation (--porcelain, hash already seen)
         if (is_group_start2) {
-            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
-            defer a.free(h1);
-            try so.writeStdout(h1);
+            try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
         } else {
-            const h1 = try std.fmt.allocPrint(a, "{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
-            defer a.free(h1);
-            try so.writeStdout(h1);
+            try w.print("{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
         }
     }
-    const cl = try std.fmt.allocPrint(a, "\t{s}\n", .{line});
-    defer a.free(cl);
-    try so.writeStdout(cl);
+    try w.writeByte('\t');
+    try w.writeAll(line);
+    try w.writeByte('\n');
+}
+
+fn writePadN(w: anytype, num: usize, width: usize) !void {
+    var nb: [20]u8 = undefined;
+    const ns = std.fmt.bufPrint(&nb, "{d}", .{num}) catch "0";
+    if (ns.len < width) try w.writeByteNTimes(' ', width - ns.len);
+    try w.writeAll(ns);
+}
+
+fn writeFmtTs(w: anytype, ts_in: i64, tz: []const u8) !void {
+    var ts = ts_in;
+    if (tz.len >= 5) {
+        const sg: i64 = if (tz[0] == '-') -1 else 1;
+        ts += sg * ((std.fmt.parseInt(i64, tz[1..3], 10) catch 0) * 60 + (std.fmt.parseInt(i64, tz[3..5], 10) catch 0)) * 60;
+    }
+    var days = @divFloor(ts, 86400);
+    var rem = @mod(ts, 86400);
+    if (rem < 0) { rem += 86400; days -= 1; }
+    const h: u32 = @intCast(@divFloor(rem, 3600));
+    rem = @mod(rem, 3600);
+    const mi: u32 = @intCast(@divFloor(rem, 60));
+    const s: u32 = @intCast(@mod(rem, 60));
+    var y: i64 = 1970;
+    var d = days;
+    while (true) {
+        const dy: i64 = if (@mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0)) 366 else 365;
+        if (d < dy) break;
+        d -= dy;
+        y += 1;
+    }
+    const lp = @mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0);
+    const md = [_]u32{ 31, if (lp) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var mo: u32 = 0;
+    var dm: u32 = @intCast(d);
+    for (md) |m| { if (dm < m) break; dm -= m; mo += 1; }
+    try w.print("{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} {s}", .{ y, mo + 1, dm + 1, h, mi, s, tz });
+}
+
+// Keep old functions for backward compatibility (unused but harmless)
+fn oC(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
+    var buf = std.array_list.Managed(u8).init(a);
+    defer buf.deinit();
+    try oCBuf(&buf, e, line, ln, se2, srt2, mal2, lnw2, abl2, suppress2, bb2);
+    try so.writeStdout(buf.items);
+}
+
+fn oD(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
+    var buf = std.array_list.Managed(u8).init(a);
+    defer buf.deinit();
+    try oDBuf(&buf, e, line, ln, se2, srt2, mal2, lnw2, abl2, suppress2, bb2);
+    try so.writeStdout(buf.items);
+}
+
+fn oP(so: *const pm.Platform, a: std.mem.Allocator, e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start2: bool, group_size2: usize) !void {
+    var buf = std.array_list.Managed(u8).init(a);
+    defer buf.deinit();
+    try oPBuf(&buf, e, line, ln, sh2, fp2, is_group_start2, group_size2);
+    try so.writeStdout(buf.items);
 }
