@@ -760,28 +760,30 @@ fn matchCharClass(ch: u8, elem: []const u8) bool {
     return if (negated) !matched else matched;
 }
 
+fn getCachedFileContent(cache: *std.StringHashMap([]const u8), gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]const u8 {
+    if (cache.get(ch)) |cached| return cached;
+    const content = try gf(gp, ch, fp2, a2);
+    const key = try a2.dupe(u8, ch);
+    cache.put(key, content) catch {};
+    return content;
+}
+
 fn gf(gp: []const u8, ch: []const u8, fp2: []const u8, a2: std.mem.Allocator) ![]const u8 {
     const bh = try git_helpers_mod.getTreeEntryHashFromCommit(gp, ch, fp2, a2);
     defer a2.free(bh);
     return try git_helpers_mod.readGitObjectContent(gp, bh, a2);
 }
 
-/// Load graft parents for a commit from .git/info/grafts
-/// Returns the rest of the line after the commit hash (the parent hashes) or null
-fn loadGraftParents(a: std.mem.Allocator, git_path: []const u8, commit_hash: []const u8) !?[]const u8 {
-    const grafts_path = try std.fmt.allocPrint(a, "{s}/info/grafts", .{git_path});
-    defer a.free(grafts_path);
-    const content = std.fs.cwd().readFileAlloc(a, grafts_path, 1024 * 1024) catch return null;
-    defer a.free(content);
+/// Load graft parents for a commit using pre-loaded grafts content
+fn lookupGraftParents(a: std.mem.Allocator, grafts_content: ?[]const u8, commit_hash: []const u8) !?[]const u8 {
+    const content = grafts_content orelse return null;
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len >= 40 and std.mem.startsWith(u8, trimmed, commit_hash[0..@min(40, commit_hash.len)])) {
-            // Return the parent hashes (everything after the commit hash)
             if (trimmed.len > 41) {
                 return try a.dupe(u8, trimmed[41..]);
             }
-            // Empty parents = root commit (no parents)
             return try a.dupe(u8, "");
         }
     }
@@ -797,6 +799,23 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer a.free(m);
         for (0..tl.len) |i| { if (m[i] == std.math.maxInt(usize)) ub[i] = false; }
     }
+    // Pre-load grafts file once
+    const grafts_content = blk: {
+        const grafts_path = std.fmt.allocPrint(a, "{s}/info/grafts", .{gp}) catch break :blk null;
+        defer a.free(grafts_path);
+        break :blk std.fs.cwd().readFileAlloc(a, grafts_path, 1024 * 1024) catch null;
+    };
+    defer if (grafts_content) |gc| a.free(gc);
+    // Cache for file content per commit hash
+    var file_cache = std.StringHashMap([]const u8).init(a);
+    defer {
+        var it2 = file_cache.iterator();
+        while (it2.next()) |entry| {
+            a.free(entry.key_ptr.*);
+            a.free(entry.value_ptr.*);
+        }
+        file_cache.deinit();
+    }
     const QE = struct { hash: []const u8, idx: []usize };
     var q = std.array_list.Managed(QE).init(a);
     defer { for (q.items) |qe| { a.free(qe.hash); a.free(qe.idx); } q.deinit(); }
@@ -806,11 +825,11 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         for (0..tl.len) |i| { if (ub[i]) try ii.append(i); }
         if (ii.items.len > 0) try q.append(.{ .hash = try a.dupe(u8, sh), .idx = try a.dupe(usize, ii.items) });
     }
+    var qi: usize = 0;
     var its: usize = 0;
-    while (q.items.len > 0 and its < 10000) : (its += 1) {
-        const cur = q.orderedRemove(0);
-        defer a.free(cur.hash);
-        defer a.free(cur.idx);
+    while (qi < q.items.len and its < 10000) : (its += 1) {
+        const cur = q.items[qi];
+        qi += 1;
         var act = std.array_list.Managed(usize).init(a);
         defer act.deinit();
         for (cur.idx) |idx| { if (ub[idx]) try act.append(idx); }
@@ -821,8 +840,8 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         defer B.freeInfo(info, a);
         var pars = std.array_list.Managed([]const u8).init(a);
         defer { for (pars.items) |p| a.free(p); pars.deinit(); }
-        // Check grafts first
-        const graft_parents = loadGraftParents(a, gp, cur.hash) catch null;
+        // Check grafts first (using cached content)
+        const graft_parents = lookupGraftParents(a, grafts_content, cur.hash) catch null;
 
         if (graft_parents) |gp_list| {
             defer a.free(gp_list);
@@ -839,13 +858,12 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
                 if (l.len == 0) break;
             }
         }
-        const tf = gf(gp, cur.hash, fp2, a) catch {
+        const tf = getCachedFileContent(&file_cache, gp, cur.hash, fp2, a) catch {
             for (act.items) |idx| {
                 if (ub[idx]) { B.setEntry(&es[idx], cur.hash, info, a) catch {}; ub[idx] = false; }
             }
             continue;
         };
-        defer a.free(tf);
         var tls = B.splitLines(a, tf) catch continue;
         defer tls.deinit();
         const t2t = try B.doLcs(a, tl, tls.items);
@@ -887,8 +905,7 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
         @memset(fap, false);
         const pars_to_check = if (first_parent_only and pars.items.len > 1) pars.items[0..1] else pars.items;
         for (pars_to_check) |ph| {
-            const pf = gf(gp, ph, fp2, a) catch continue;
-            defer a.free(pf);
+            const pf = getCachedFileContent(&file_cache, gp, ph, fp2, a) catch continue;
             var pl = B.splitLines(a, pf) catch continue;
             defer pl.deinit();
             const t2p = try B.doLcs(a, tls.items, pl.items);
