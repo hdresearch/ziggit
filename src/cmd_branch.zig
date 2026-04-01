@@ -5,6 +5,7 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const cmd_reflog = @import("cmd_reflog.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -128,6 +129,15 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
             }
         }.lt);
 
+        // Succinct mode: compact branch list
+        if (succinct_mod.isEnabled() and !verbose) {
+            for (branches.items) |branch| {
+                const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
+                const msg = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix, branch });
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
+        } else {
         for (branches.items) |branch| {
             const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
             if (verbose) {
@@ -163,6 +173,7 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
+        }
         }
     } else if (std.mem.startsWith(u8, first_arg.?, "--set-upstream-to=") or std.mem.eql(u8, first_arg.?, "--set-upstream-to") or std.mem.eql(u8, first_arg.?, "-u")) {
         // Set upstream tracking branch
@@ -248,9 +259,13 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         
         std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_config.items }) catch {};
         
+        if (succinct_mod.isEnabled()) {
+            try platform_impl.writeStdout("ok\n");
+        } else {
         const success_msg = try std.fmt.allocPrint(allocator, "branch '{s}' set up to track '{s}'.\n", .{branch_name, upstream_name});
         defer allocator.free(success_msg);
         try platform_impl.writeStdout(success_msg);
+        }
     } else if (std.mem.eql(u8, first_arg.?, "--unset-upstream")) {
         // Unset upstream
         const branch_arg = fake_args.next();
@@ -374,9 +389,13 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     },
                     else => return err,
                 };
+                if (succinct_mod.isEnabled()) {
+                    try platform_impl.writeStdout("ok\n");
+                } else {
                 const success_msg = try std.fmt.allocPrint(allocator, "Deleted remote-tracking branch {s}.\n", .{branch_name});
                 defer allocator.free(success_msg);
                 try platform_impl.writeStdout(success_msg);
+                }
             } else {
                 // Read branch target before deleting (for the "was ..." message)
                 const was_info: []const u8 = blk_was: {
@@ -456,12 +475,16 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                         }
                     }
                 }
+                if (succinct_mod.isEnabled()) {
+                    try platform_impl.writeStdout("ok\n");
+                } else {
                 const success_msg = if (was_info.len > 0)
                     try std.fmt.allocPrint(allocator, "Deleted branch {s} (was {s}).\n", .{ branch_name, was_info })
                 else
                     try std.fmt.allocPrint(allocator, "Deleted branch {s}.\n", .{branch_name});
                 defer allocator.free(success_msg);
                 try platform_impl.writeStdout(success_msg);
+                }
             }
         }
     } else if (std.mem.eql(u8, first_arg.?, "-m") or std.mem.eql(u8, first_arg.?, "-M")) {
