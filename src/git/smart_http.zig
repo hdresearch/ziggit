@@ -306,7 +306,7 @@ fn httpGetWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.ht
 
     if (resp.head.status != .ok) return error.HttpError;
 
-    var transfer_buf: [16384]u8 = undefined;
+    var transfer_buf: [65536]u8 = undefined;
     const rdr = resp.reader(&transfer_buf);
     return rdr.allocRemaining(allocator, std.io.Limit.limited(max_response_size)) catch return error.HttpError;
 }
@@ -391,7 +391,7 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
 
     if (resp.head.status != .ok) return error.HttpError;
 
-    var transfer_buf: [16384]u8 = undefined;
+    var transfer_buf: [65536]u8 = undefined;
     const rdr = resp.reader(&transfer_buf);
 
     // Pre-allocate based on Content-Length if available
