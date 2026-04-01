@@ -539,13 +539,14 @@ pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8
                 if (msg_line.len == 0) {
                     try platform_impl.writeStdout("    \n");
                 } else {
-                const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
-                defer allocator.free(indented);
-                try platform_impl.writeStdout(indented);
+                    const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
+                    defer allocator.free(indented);
+                    try platform_impl.writeStdout(indented);
+                }
             }
         }
-    }
-    try platform_impl.writeStdout("\n");
+        try platform_impl.writeStdout("\n");
+    }  // End of non-succinct commit body output
 
     // helpers.Show diff
     const this_tree = tree_hash orelse return;
