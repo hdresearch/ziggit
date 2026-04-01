@@ -3000,10 +3000,20 @@ pub const Repository = struct {
     }
 
     fn checkoutTree(self: *Repository, tree_hash: *const [40]u8, target_path: []const u8) !void {
-        // Read tree content directly (skip header round-trip if possible)
+        // Convert hex to raw bytes once, then use raw-bytes path for all recursion
+        var hash_bytes: [20]u8 = undefined;
+        _ = std.fmt.hexToBytes(&hash_bytes, tree_hash) catch return error.InvalidTreeObject;
+        return self.checkoutTreeRawFast(&hash_bytes, target_path);
+    }
+
+    /// Checkout tree using raw 20-byte SHA (avoids hex<->bytes conversion per entry).
+    /// Opens target directory once and uses dir fd for all blob writes.
+    fn checkoutTreeRawFast(self: *Repository, tree_hash_bytes: *const [20]u8, target_path: []const u8) !void {
         const fa = self._fast_alloc;
-        const tree_content = self.readObjectContentFromPack(tree_hash) catch blk: {
-            const raw = try self.readRawObject(tree_hash);
+        const tree_content = self.readObjectContentFromPackBytes(tree_hash_bytes) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{tree_hash_bytes}) catch return error.InvalidTreeObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidTreeObject;
             const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
                 fa.free(raw);
                 return error.InvalidTreeObject;
@@ -3014,50 +3024,79 @@ pub const Repository = struct {
         };
         defer fa.free(tree_content);
 
+        // Open target directory once for openat()-based file creation
+        var target_dir = std.fs.openDirAbsolute(target_path, .{}) catch null;
+        defer if (target_dir) |*d| d.close();
+
         var pos: usize = 0;
         while (pos < tree_content.len) {
-            // Parse mode
             const space_pos = std.mem.indexOfScalarPos(u8, tree_content, pos, ' ') orelse break;
             const mode = tree_content[pos..space_pos];
-
-            // Parse name
             const name_start = space_pos + 1;
             const null_pos_name = std.mem.indexOfScalarPos(u8, tree_content, name_start, 0) orelse break;
             const name = tree_content[name_start..null_pos_name];
-
-            // Parse 20-byte SHA-1
             const sha_start = null_pos_name + 1;
             if (sha_start + 20 > tree_content.len) break;
-            const sha_bytes = tree_content[sha_start .. sha_start + 20];
+            const sha20 = tree_content[sha_start..][0..20];
 
-            // Convert SHA to hex (stack buffer)
-            var sha_hex: [40]u8 = undefined;
-            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha_bytes}) catch break;
-
-            // Check if it's a blob or tree
             if (std.mem.eql(u8, mode, "100644") or std.mem.eql(u8, mode, "100755")) {
-                try self.checkoutBlob(&sha_hex, target_path, name);
+                // Write blob using dir fd (avoids full path resolution per file)
+                self.checkoutBlobRawFast(sha20, &target_dir, target_path, name) catch {};
             } else if (std.mem.eql(u8, mode, "40000")) {
-                // Use stack buffer for subdir path
                 var subdir_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const subdir_path = std.fmt.bufPrint(&subdir_buf, "{s}/{s}", .{ target_path, name }) catch {
-                    const p = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ target_path, name });
-                    defer self.allocator.free(p);
-                    std.fs.cwd().makePath(p) catch {};
-                    try self.checkoutTree(&sha_hex, p);
                     pos = sha_start + 20;
                     continue;
                 };
-                std.fs.cwd().makePath(subdir_path) catch {};
-                try self.checkoutTree(&sha_hex, subdir_path);
-            } else if (std.mem.eql(u8, mode, "120000")) {
-                // Symlink entry — skip gracefully
-            } else if (std.mem.eql(u8, mode, "160000")) {
-                // Submodule entry — skip gracefully
+                std.fs.makeDirAbsolute(subdir_path) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => std.fs.cwd().makePath(subdir_path) catch {},
+                };
+                self.checkoutTreeRawFast(sha20, subdir_path) catch {};
             }
+            // Skip symlinks (120000) and submodules (160000)
 
             pos = sha_start + 20;
         }
+    }
+
+    /// Checkout a single blob using raw 20-byte SHA, with optional dir fd for openat.
+    fn checkoutBlobRawFast(self: *Repository, sha20: *const [20]u8, target_dir: *?std.fs.Dir, target_path: []const u8, filename: []const u8) !void {
+        const fa = self._fast_alloc;
+        const content = self.readObjectContentFromPackBytes(sha20) catch blk: {
+            var sha_hex: [40]u8 = undefined;
+            _ = std.fmt.bufPrint(&sha_hex, "{x}", .{sha20}) catch return error.InvalidBlobObject;
+            const raw = self.readRawObject(&sha_hex) catch return error.InvalidBlobObject;
+            const null_pos = std.mem.indexOfScalar(u8, raw, 0) orelse {
+                fa.free(raw);
+                return error.InvalidBlobObject;
+            };
+            const content_len = raw.len - null_pos - 1;
+            std.mem.copyForwards(u8, raw[0..content_len], raw[null_pos + 1 ..]);
+            break :blk fa.realloc(raw, content_len) catch raw[0..content_len];
+        };
+        defer fa.free(content);
+
+        // Try openat via dir fd first (faster)
+        if (target_dir.*) |*dir| {
+            const file = dir.createFile(filename, .{ .truncate = true }) catch {
+                var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ target_path, filename }) catch return;
+                const f2 = std.fs.createFileAbsolute(file_path, .{ .truncate = true }) catch return;
+                defer f2.close();
+                f2.writeAll(content) catch {};
+                return;
+            };
+            defer file.close();
+            file.writeAll(content) catch {};
+            return;
+        }
+
+        var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ target_path, filename }) catch return;
+        const file = std.fs.createFileAbsolute(file_path, .{ .truncate = true }) catch return;
+        defer file.close();
+        file.writeAll(content) catch {};
     }
 
     /// Combined checkout + index building in a single tree walk (hex version for root call).
