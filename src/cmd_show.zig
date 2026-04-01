@@ -199,6 +199,8 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 try showCommitDiffOnly(git_object, git_path, platform_impl, allocator);
             } else if (name_only) {
                 try showCommitNameOnly(git_object, git_path, platform_impl, allocator);
+            } else if (stat_only) {
+                try showCommitWithOpts(git_object, current.hash, git_path, platform_impl, allocator, .{ .show_stat = true, .show_patch = false });
             } else {
                 try showCommitDefault(git_object, current.hash, git_path, platform_impl, allocator);
             }
@@ -246,6 +248,8 @@ pub fn cmdShow(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgItera
                 } else if (suppress_diff) {
                     // helpers.Show header only, no diff
                     try showCommitHeaderOnly(git_object, commit_hash, platform_impl, allocator);
+                } else if (stat_only) {
+                    try showCommitWithOpts(git_object, commit_hash, git_path, platform_impl, allocator, .{ .show_stat = true, .show_patch = false });
                 } else {
                     try showCommitDefault(git_object, commit_hash, git_path, platform_impl, allocator);
                 }
@@ -406,10 +410,66 @@ pub fn showCommitPrettyFormat(git_object: objects.GitObject, commit_hash: []cons
 
 
 pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform, allocator: std.mem.Allocator, opts: ShowCommitOpts) !void {
-    // helpers.Show commit header
-    const header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
-    defer allocator.free(header);
-    try platform_impl.writeStdout(header);
+    // helpers.Show commit header (succinct or normal)
+    if (succinct_mod.isEnabled() and opts.show_stat) {
+        // Succinct header format: "HASH subject (date) author"
+        // Parse commit to get subject, author and date
+        var temp_lines = std.mem.splitSequence(u8, git_object.data, "\n");
+        var temp_author: ?[]const u8 = null;
+        var temp_empty_found = false;
+        var temp_subject: ?[]const u8 = null;
+        
+        while (temp_lines.next()) |line| {
+            if (temp_empty_found and temp_subject == null and line.len > 0) {
+                temp_subject = line;
+                break;
+            } else if (line.len == 0) {
+                temp_empty_found = true;
+            } else if (std.mem.startsWith(u8, line, "author ")) {
+                temp_author = line["author ".len..];
+            }
+        }
+        
+        const short_hash = if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash;
+        const subject = temp_subject orelse "";
+        
+        // Extract just the author name (before email)
+        const author_name = if (temp_author) |auth| blk: {
+            if (std.mem.indexOf(u8, auth, " <")) |email_start| {
+                break :blk auth[0..email_start];
+            }
+            // Extract just the timestamp part
+            if (std.mem.lastIndexOf(u8, auth, " ")) |last_space| {
+                if (std.mem.lastIndexOf(u8, auth[0..last_space], " ")) |second_last| {
+                    break :blk auth[0..second_last];
+                }
+            }
+            break :blk auth;
+        } else "unknown";
+        
+        // Extract date (assuming unix timestamp)
+        const date = if (temp_author) |auth| blk: {
+            const parts = std.mem.split(u8, auth, " ");
+            var part_count: usize = 0;
+            var timestamp_str: ?[]const u8 = null;
+            while (parts.next()) |part| {
+                part_count += 1;
+                if (part_count >= 2 and std.fmt.parseInt(i64, part, 10) catch null != null) {
+                    timestamp_str = part;
+                    break;
+                }
+            }
+            break :blk timestamp_str orelse "unknown";
+        } else "unknown";
+        
+        const succinct_header = try std.fmt.allocPrint(allocator, "{s} {s} ({s}) {s}\n", .{ short_hash, subject, date, author_name });
+        defer allocator.free(succinct_header);
+        try platform_impl.writeStdout(succinct_header);
+    } else {
+        const header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{commit_hash});
+        defer allocator.free(header);
+        try platform_impl.writeStdout(header);
+    }
 
     // helpers.Parse commit data to extract info
     var hdr_lines = std.mem.splitSequence(u8, git_object.data, "\n");
@@ -451,32 +511,34 @@ pub fn showCommitWithOpts(git_object: objects.GitObject, commit_hash: []const u8
         try platform_impl.writeStdout(merge_line.items);
     }
 
-    // Display author with parsed format
-    if (author_line) |author| {
-        const a_name = helpers.parseAuthorName(author);
-        const a_email = helpers.parseAuthorEmail(author);
-        const author_output = try std.fmt.allocPrint(allocator, "Author: {s} <{s}>\n", .{ a_name, a_email });
-        defer allocator.free(author_output);
-        try platform_impl.writeStdout(author_output);
-        
-        const date_str = helpers.parseAuthorDateGitFmt(author, allocator);
-        defer if (date_str) |d| allocator.free(d);
-        if (date_str) |d| {
-            const date_output = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{d});
-            defer allocator.free(date_output);
-            try platform_impl.writeStdout(date_output);
+    // Skip commit body in succinct mode with --stat
+    if (!(succinct_mod.isEnabled() and opts.show_stat)) {
+        // Display author with parsed format
+        if (author_line) |author| {
+            const a_name = helpers.parseAuthorName(author);
+            const a_email = helpers.parseAuthorEmail(author);
+            const author_output = try std.fmt.allocPrint(allocator, "Author: {s} <{s}>\n", .{ a_name, a_email });
+            defer allocator.free(author_output);
+            try platform_impl.writeStdout(author_output);
+            
+            const date_str = helpers.parseAuthorDateGitFmt(author, allocator);
+            defer if (date_str) |d| allocator.free(d);
+            if (date_str) |d| {
+                const date_output = try std.fmt.allocPrint(allocator, "Date:   {s}\n", .{d});
+                defer allocator.free(date_output);
+                try platform_impl.writeStdout(date_output);
+            }
         }
-    }
 
-    // Display commit message
-    try platform_impl.writeStdout("\n");
-    if (message.items.len > 0) {
-        const msg_text = std.mem.trimRight(u8, message.items, "\n");
-        var msg_iter = std.mem.splitSequence(u8, msg_text, "\n");
-        while (msg_iter.next()) |msg_line| {
-            if (msg_line.len == 0) {
-                try platform_impl.writeStdout("    \n");
-            } else {
+        // Display commit message
+        try platform_impl.writeStdout("\n");
+        if (message.items.len > 0) {
+            const msg_text = std.mem.trimRight(u8, message.items, "\n");
+            var msg_iter = std.mem.splitSequence(u8, msg_text, "\n");
+            while (msg_iter.next()) |msg_line| {
+                if (msg_line.len == 0) {
+                    try platform_impl.writeStdout("    \n");
+                } else {
                 const indented = try std.fmt.allocPrint(allocator, "    {s}\n", .{msg_line});
                 defer allocator.free(indented);
                 try platform_impl.writeStdout(indented);
