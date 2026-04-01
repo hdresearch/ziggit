@@ -1817,14 +1817,18 @@ pub const Repository = struct {
         };
         defer clone_result.deinit();
 
-        // Save pack + generate idx
+        // Save pack + generate idx from in-memory data (avoid re-reading from disk)
         if (clone_result.pack_data.len >= 32) {
             const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
-            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
-            defer allocator.free(pp);
-            try idx_writer.generateIdx(allocator, pp);
+            const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
+            defer allocator.free(idx_data);
+            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(ip);
+            const idx_f = try std.fs.cwd().createFile(ip, .{});
+            defer idx_f.close();
+            try idx_f.writeAll(idx_data);
         }
 
         // Write refs
@@ -2251,14 +2255,18 @@ pub const Repository = struct {
         };
         defer clone_result.deinit();
 
-        // Save pack + generate idx
+        // Save pack + generate idx from in-memory data
         if (clone_result.pack_data.len >= 32) {
             const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
-            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
-            defer allocator.free(pp);
-            try idx_writer.generateIdx(allocator, pp);
+            const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
+            defer allocator.free(idx_data);
+            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(ip);
+            const idx_f = try std.fs.cwd().createFile(ip, .{});
+            defer idx_f.close();
+            try idx_f.writeAll(idx_data);
         }
 
         // Write refs (branches + tags) and update HEAD
@@ -2350,14 +2358,18 @@ pub const Repository = struct {
         };
         defer clone_result.deinit();
 
-        // Save pack + generate idx
+        // Save pack + generate idx from in-memory data
         if (clone_result.pack_data.len >= 32) {
             const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
             defer allocator.free(checksum_hex);
 
-            const pp = try pack_writer.packPath(allocator, git_dir, checksum_hex);
-            defer allocator.free(pp);
-            try idx_writer.generateIdx(allocator, pp);
+            const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
+            defer allocator.free(idx_data);
+            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(ip);
+            const idx_f = try std.fs.cwd().createFile(ip, .{});
+            defer idx_f.close();
+            try idx_f.writeAll(idx_data);
         }
 
         // Write refs and update HEAD
