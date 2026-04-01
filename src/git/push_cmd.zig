@@ -1,6 +1,7 @@
 const git_helpers_mod = @import("../git_helpers.zig");
 const std = @import("std");
 const platform_mod = @import("../platform/platform.zig");
+const succinct_mod = @import("../succinct.zig");
 const refs = @import("refs.zig");
 const objects = @import("objects.zig");
 const fetch_cmd = @import("fetch_cmd.zig");
@@ -1116,9 +1117,49 @@ fn pushSingleRefspec(
             } else |_| {}
         }
 
+        // Check if remote ref is already up-to-date
+        var was_up_to_date = false;
+        if (readFileContent(allocator, ref_path)) |existing| {
+            defer allocator.free(existing);
+            const existing_hash = std.mem.trim(u8, existing, " \t\r\n");
+            if (std.mem.eql(u8, existing_hash, hash)) {
+                was_up_to_date = true;
+            }
+        } else |_| {}
+
         const data = try std.fmt.allocPrint(allocator, "{s}\n", .{hash});
         defer allocator.free(data);
         std.fs.cwd().writeFile(.{ .sub_path = ref_path, .data = data }) catch {};
+        
+        // Output success message in succinct mode (silent on up-to-date)
+        if (succinct_mod.isEnabled() and !was_up_to_date) {
+            const branch_name = if (std.mem.startsWith(u8, full_dst, "refs/heads/"))
+                full_dst["refs/heads/".len..]
+            else if (std.mem.startsWith(u8, full_dst, "refs/tags/"))
+                full_dst["refs/tags/".len..]
+            else
+                full_dst;
+            const short_hash = if (hash.len >= 7) hash[0..7] else hash;
+            const success_msg = std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, short_hash }) catch "";
+            if (success_msg.len > 0) {
+                defer allocator.free(success_msg);
+                platform_impl.writeStdout(success_msg) catch {};
+            }
+        }
+        
+        // Succinct mode: output success message
+        if (succinct_mod.isEnabled()) {
+            const branch_name = if (std.mem.startsWith(u8, full_dst, "refs/heads/"))
+                full_dst["refs/heads/".len..]
+            else if (std.mem.startsWith(u8, full_dst, "refs/tags/"))
+                full_dst["refs/tags/".len..]
+            else
+                full_dst;
+            const short_hash = if (hash.len >= 7) hash[0..7] else hash;
+            const success_msg = try std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, short_hash });
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        }
 
         // Update local tracking ref (only if value changed)
         if (std.mem.startsWith(u8, full_dst, "refs/heads/")) {
@@ -1144,6 +1185,36 @@ fn pushSingleRefspec(
                     }
                 }
             } else |_| {}
+        }
+    }
+    
+    // Output success message for succinct mode
+    if (!dry_run and succinct_mod.isEnabled()) {
+        // Check if this was actually an update (not up-to-date)
+        var was_update = true;
+        if (readFileContent(allocator, std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_dst }) catch "")) |old| {
+            defer allocator.free(old);
+            const old_h = std.mem.trim(u8, old, " \t\r\n");
+            if (old_h.len >= 40 and std.mem.eql(u8, old_h[0..40], hash)) {
+                was_update = false; // up-to-date
+            }
+        } else |_| {}
+        
+        if (was_update) {
+            // Extract branch name for output
+            const branch_name = if (std.mem.startsWith(u8, full_dst, "refs/heads/"))
+                full_dst["refs/heads/".len..]
+            else if (std.mem.startsWith(u8, full_dst, "refs/tags/"))
+                full_dst["refs/tags/".len..]
+            else
+                full_dst;
+            
+            const short_hash = if (hash.len >= 7) hash[0..7] else hash;
+            const success_msg = std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, short_hash }) catch "";
+            if (success_msg.len > 0) {
+                defer allocator.free(success_msg);
+                platform_impl.writeStdout(success_msg) catch {};
+            }
         }
     }
 
