@@ -58,6 +58,36 @@ pub const Repository = struct {
     _delta_cache_next: u4 = 0,
 
     /// Open an existing repository at the specified path
+    /// Open a bare repository without any warmup or HEAD validation.
+    /// This is the fastest open path — ideal for library consumers
+    /// that will immediately call findCommit() or checkoutTo().
+    pub fn openBare(allocator: std.mem.Allocator, path: []const u8) !Repository {
+        const abs_path = if (std.fs.path.isAbsolute(path))
+            try allocator.dupe(u8, path)
+        else blk: {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = try std.process.getCwd(&cwd_buf);
+            break :blk try std.fs.path.resolve(allocator, &[_][]const u8{ cwd, path });
+        };
+
+        // For bare repos, git_dir == path (no .git subdir)
+        const git_dir = try allocator.dupe(u8, abs_path);
+
+        var repo = Repository{
+            .path = abs_path,
+            .git_dir = git_dir,
+            .allocator = allocator,
+            ._pack_only = true, // bare repos from clone always have packs
+        };
+
+        // Cache git dir fd for openat()-based access
+        if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
+
+        return repo;
+    }
+
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Repository {
         const abs_path = if (std.fs.path.isAbsolute(path))
             try allocator.dupe(u8, path)
@@ -901,35 +931,28 @@ pub const Repository = struct {
 
     /// Find specific commit hash
     pub fn findCommit(self: *const Repository, committish: []const u8) ![40]u8 {
-        // Special case for HEAD
+        // Special case for HEAD — use fast path with caching
         if (std.mem.eql(u8, committish, "HEAD")) {
             return try self.revParseHeadUncached();
         }
         
+        // Full 40-char hex hash — no resolution needed
         if (committish.len == 40 and isValidHex(committish)) {
             var result: [40]u8 = undefined;
             @memcpy(&result, committish);
             return result;
         }
 
-        // Use stack buffers to avoid heap allocation for ref path construction
+        // Use resolveRefFast (openat + stack alloc) instead of resolveRef (heap alloc)
         var ref_buf: [256]u8 = undefined;
         if (committish.len <= 256 - "refs/heads/".len) {
             const ref_path = std.fmt.bufPrint(&ref_buf, "refs/heads/{s}", .{committish}) catch unreachable;
-            if (self.resolveRef(ref_path)) |hash| return hash else |_| {}
-        } else {
-            const ref_path = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{committish});
-            defer self.allocator.free(ref_path);
-            if (self.resolveRef(ref_path)) |hash| return hash else |_| {}
+            if (self.resolveRefFast(ref_path)) |hash| return hash else |_| {}
         }
 
         if (committish.len <= 256 - "refs/tags/".len) {
             const tag_path = std.fmt.bufPrint(&ref_buf, "refs/tags/{s}", .{committish}) catch unreachable;
-            if (self.resolveRef(tag_path)) |hash| return hash else |_| {}
-        } else {
-            const tag_path = try std.fmt.allocPrint(self.allocator, "refs/tags/{s}", .{committish});
-            defer self.allocator.free(tag_path);
-            if (self.resolveRef(tag_path)) |hash| return hash else |_| {}
+            if (self.resolveRefFast(tag_path)) |hash| return hash else |_| {}
         }
 
         if (committish.len >= 4 and committish.len <= 40 and isValidHex(committish)) {
