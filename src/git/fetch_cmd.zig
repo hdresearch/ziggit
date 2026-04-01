@@ -1807,6 +1807,15 @@ fn performLocalFetch(
         }
     }
 
+    // Output success message for succinct mode (before checking for failures)
+    if (!fetch_failed and succinct_mod.isEnabled() and updated_refs_count > 0) {
+        const success_msg = std.fmt.allocPrint(allocator, "ok fetch {s} {d} refs\n", .{ remote_name, updated_refs_count }) catch "";
+        if (success_msg.len > 0) {
+            defer allocator.free(success_msg);
+            platform_impl.writeStdout(success_msg) catch {};
+        }
+    }
+    
     if (fetch_failed) {
         if (has_df_conflict and is_named_remote) {
             const df_err1 = try std.fmt.allocPrint(allocator, "error: some local refs could not be updated; try running\n 'git remote prune {s}' to remove any old, conflicting branches\n", .{remote_name});
