@@ -1464,91 +1464,12 @@ pub const Repository = struct {
         var local_refs_list = std.array_list.Managed(smart_http.LocalRef).init(self.allocator);
         defer local_refs_list.deinit();
 
-        // Read refs/remotes/origin/* to build have list (non-bare repos)
-        const remote_refs_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/remotes/origin", .{self.git_dir});
-        defer self.allocator.free(remote_refs_dir);
-
-        var found_remote_refs = false;
-        if (std.fs.cwd().openDir(remote_refs_dir, .{ .iterate = true })) |*dir_handle| {
-            var dir = dir_handle.*;
-            defer dir.close();
-            var iter = dir.iterate();
-            while (try iter.next()) |entry| {
-                if (entry.kind != .file) continue;
-                found_remote_refs = true;
-                const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ remote_refs_dir, entry.name });
-                defer self.allocator.free(ref_path);
-                const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
-                defer self.allocator.free(content);
-                const trimmed = std.mem.trim(u8, content, " \t\n\r");
-                if (trimmed.len == 40) {
-                    const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
-                    try local_refs_list.append(.{
-                        .hash = trimmed[0..40].*,
-                        .name = ref_name,
-                    });
-                }
-            }
-        } else |_| {}
-
-        // For bare repos (no refs/remotes/origin), scan refs/heads/* and packed-refs
-        if (!found_remote_refs) {
-            const heads_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads", .{self.git_dir});
-            defer self.allocator.free(heads_dir);
-
-            if (std.fs.cwd().openDir(heads_dir, .{ .iterate = true })) |*dir_handle| {
-                var dir = dir_handle.*;
-                defer dir.close();
-                var iter = dir.iterate();
-                while (try iter.next()) |entry| {
-                    if (entry.kind != .file) continue;
-                    const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ heads_dir, entry.name });
-                    defer self.allocator.free(ref_path);
-                    const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
-                    defer self.allocator.free(content);
-                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
-                    if (trimmed.len == 40) {
-                        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
-                        try local_refs_list.append(.{
-                            .hash = trimmed[0..40].*,
-                            .name = ref_name,
-                        });
-                    }
-                }
-            } else |_| {}
-
-            // Also scan packed-refs for refs stored there (e.g., after ziggit clone)
-            var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch "";
-            if (packed_path.len > 0) {
-                if (std.fs.cwd().readFileAlloc(self.allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
-                    defer self.allocator.free(packed_data);
-                    var lines = std.mem.splitScalar(u8, packed_data, '\n');
-                    while (lines.next()) |line| {
-                        if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
-                        if (line.len > 41 and line[40] == ' ') {
-                            const ref_name_raw = line[41..];
-                            if (std.mem.startsWith(u8, ref_name_raw, "refs/heads/")) {
-                                // Check if already found as loose ref
-                                var already_found = false;
-                                for (local_refs_list.items) |lr| {
-                                    if (std.mem.eql(u8, lr.name, ref_name_raw)) {
-                                        already_found = true;
-                                        break;
-                                    }
-                                }
-                                if (!already_found) {
-                                    const ref_name = try std.fmt.allocPrint(self.allocator, "{s}", .{ref_name_raw});
-                                    try local_refs_list.append(.{
-                                        .hash = line[0..40].*,
-                                        .name = ref_name,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                } else |_| {}
-            }
+        // OPTIMIZATION: For bare repos with packed-refs, use the cached hash map
+        // instead of scanning directories + reading files
+        if (self._pack_only) {
+            try self.collectLocalRefsFromPackedRefs(&local_refs_list);
+        } else {
+            try self.collectLocalRefsFromDirs(&local_refs_list);
         }
 
         // Free local ref names when done (ownership was kept for fetchNewPack)
@@ -1597,60 +1518,14 @@ pub const Repository = struct {
         const pack_writer = @import("git/pack_writer.zig");
         const idx_writer = @import("git/idx_writer.zig");
 
-        // Collect local refs for negotiation (same logic as fetchHttps)
+        // Collect local refs for negotiation (reuse shared logic)
         var local_refs_list = std.array_list.Managed(ssh_transport.LocalRef).init(self.allocator);
         defer local_refs_list.deinit();
 
-        const remote_refs_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/remotes/origin", .{self.git_dir});
-        defer self.allocator.free(remote_refs_dir);
-
-        var found_remote_refs = false;
-        if (std.fs.cwd().openDir(remote_refs_dir, .{ .iterate = true })) |*dir_handle| {
-            var dir = dir_handle.*;
-            defer dir.close();
-            var iter = dir.iterate();
-            while (try iter.next()) |entry| {
-                if (entry.kind != .file) continue;
-                found_remote_refs = true;
-                const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ remote_refs_dir, entry.name });
-                defer self.allocator.free(ref_path);
-                const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
-                defer self.allocator.free(content);
-                const trimmed = std.mem.trim(u8, content, " \t\n\r");
-                if (trimmed.len == 40) {
-                    const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
-                    try local_refs_list.append(.{
-                        .hash = trimmed[0..40].*,
-                        .name = ref_name,
-                    });
-                }
-            }
-        } else |_| {}
-
-        if (!found_remote_refs) {
-            const heads_dir = try std.fmt.allocPrint(self.allocator, "{s}/refs/heads", .{self.git_dir});
-            defer self.allocator.free(heads_dir);
-
-            if (std.fs.cwd().openDir(heads_dir, .{ .iterate = true })) |*dir_handle| {
-                var dir = dir_handle.*;
-                defer dir.close();
-                var iter = dir.iterate();
-                while (try iter.next()) |entry| {
-                    if (entry.kind != .file) continue;
-                    const ref_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ heads_dir, entry.name });
-                    defer self.allocator.free(ref_path);
-                    const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
-                    defer self.allocator.free(content);
-                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
-                    if (trimmed.len == 40) {
-                        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
-                        try local_refs_list.append(.{
-                            .hash = trimmed[0..40].*,
-                            .name = ref_name,
-                        });
-                    }
-                }
-            } else |_| {}
+        if (self._pack_only) {
+            try self.collectLocalRefsFromPackedRefs(&local_refs_list);
+        } else {
+            try self.collectLocalRefsFromDirs(&local_refs_list);
         }
 
         defer for (local_refs_list.items) |lr| {
@@ -1680,6 +1555,110 @@ pub const Repository = struct {
                 }
                 try writeRemoteRef(self.allocator, self.git_dir, "origin", ref.name, &ref.hash);
             }
+        }
+    }
+
+    /// Collect local refs from the packed-refs hash map (fast path for bare repos)
+    fn collectLocalRefsFromPackedRefs(self: *Repository, list: *std.array_list.Managed(@import("git/smart_http.zig").LocalRef)) !void {
+        // Ensure packed-refs hash map is loaded
+        _ = self.resolveRefFromPackedRefs("__nonexistent__") catch {};
+        if (self._cached_packed_refs_map) |map| {
+            var iter = map.iterator();
+            while (iter.next()) |entry| {
+                const ref_name = entry.key_ptr.*;
+                if (std.mem.startsWith(u8, ref_name, "refs/heads/")) {
+                    try list.append(.{
+                        .hash = entry.value_ptr.*,
+                        .name = try self.allocator.dupe(u8, ref_name),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Collect local refs by scanning directories (slow path for non-bare repos)
+    fn collectLocalRefsFromDirs(self: *Repository, list: *std.array_list.Managed(@import("git/smart_http.zig").LocalRef)) !void {
+        // Read refs/remotes/origin/* to build have list
+        var remote_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const remote_refs_dir = std.fmt.bufPrint(&remote_dir_buf, "{s}/refs/remotes/origin", .{self.git_dir}) catch return;
+
+        var found_remote_refs = false;
+        if (std.fs.cwd().openDir(remote_refs_dir, .{ .iterate = true })) |*dir_handle| {
+            var dir = dir_handle.*;
+            defer dir.close();
+            var iter = dir.iterate();
+            while (try iter.next()) |entry| {
+                if (entry.kind != .file) continue;
+                found_remote_refs = true;
+                var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ remote_refs_dir, entry.name }) catch continue;
+                const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
+                defer self.allocator.free(content);
+                const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                if (trimmed.len == 40) {
+                    const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
+                    try list.append(.{
+                        .hash = trimmed[0..40].*,
+                        .name = ref_name,
+                    });
+                }
+            }
+        } else |_| {}
+
+        if (!found_remote_refs) {
+            var heads_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const heads_dir = std.fmt.bufPrint(&heads_dir_buf, "{s}/refs/heads", .{self.git_dir}) catch return;
+
+            if (std.fs.cwd().openDir(heads_dir, .{ .iterate = true })) |*dir_handle| {
+                var dir = dir_handle.*;
+                defer dir.close();
+                var iter = dir.iterate();
+                while (try iter.next()) |entry| {
+                    if (entry.kind != .file) continue;
+                    var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ heads_dir, entry.name }) catch continue;
+                    const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
+                    defer self.allocator.free(content);
+                    const trimmed = std.mem.trim(u8, content, " \t\n\r");
+                    if (trimmed.len == 40) {
+                        const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
+                        try list.append(.{
+                            .hash = trimmed[0..40].*,
+                            .name = ref_name,
+                        });
+                    }
+                }
+            } else |_| {}
+
+            // Also scan packed-refs
+            var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return;
+            if (std.fs.cwd().readFileAlloc(self.allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
+                defer self.allocator.free(packed_data);
+                var lines = std.mem.splitScalar(u8, packed_data, '\n');
+                while (lines.next()) |line| {
+                    if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
+                    if (line.len > 41 and line[40] == ' ') {
+                        const ref_name_raw = line[41..];
+                        if (std.mem.startsWith(u8, ref_name_raw, "refs/heads/")) {
+                            var already_found = false;
+                            for (list.items) |lr| {
+                                if (std.mem.eql(u8, lr.name, ref_name_raw)) {
+                                    already_found = true;
+                                    break;
+                                }
+                            }
+                            if (!already_found) {
+                                const ref_name = try self.allocator.dupe(u8, ref_name_raw);
+                                try list.append(.{
+                                    .hash = line[0..40].*,
+                                    .name = ref_name,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else |_| {}
         }
     }
 
