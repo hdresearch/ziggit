@@ -75,8 +75,29 @@ pub fn writeCheckoutSuccess(platform_impl: *const platform_mod.Platform, allocat
                 }
             }
         }
+        if (std.mem.indexOf(u8, msg, "Switched to and reset")) |_| {
+            if (std.mem.indexOf(u8, msg, "'")) |q1| {
+                if (std.mem.indexOfScalarPos(u8, msg, q1 + 1, '\'')) |q2| {
+                    const branch = msg[q1 + 1 .. q2];
+                    const sm2 = try std.fmt.allocPrint(allocator, "ok switched to {s}\n", .{branch});
+                    defer allocator.free(sm2);
+                    try platform_impl.writeStderr(sm2);
+                    return;
+                }
+            }
+        }
         if (std.mem.indexOf(u8, msg, "Already on")) |_| {
             try platform_impl.writeStderr("ok\n");
+            return;
+        }
+        if (std.mem.indexOf(u8, msg, "HEAD is now at")) |_| {
+            // Extract hash from "HEAD is now at <hash>..." or "Note: switching...\nHEAD is now at <hash> <subj>"
+            const head_line = if (std.mem.indexOf(u8, msg, "HEAD is now at ")) |pos| msg[pos + "HEAD is now at ".len ..] else msg;
+            const end = std.mem.indexOfScalar(u8, head_line, ' ') orelse std.mem.indexOfScalar(u8, head_line, '.') orelse std.mem.indexOfScalar(u8, head_line, '\n') orelse head_line.len;
+            const hash = head_line[0..end];
+            const sm2 = try std.fmt.allocPrint(allocator, "ok detached at {s}\n", .{hash});
+            defer allocator.free(sm2);
+            try platform_impl.writeStderr(sm2);
             return;
         }
         // Fallback: just pass through
@@ -181,7 +202,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
-        try platform_impl.writeStderr(success_msg);
+        try writeCheckoutSuccess(platform_impl, allocator, success_msg);
         return;
     }
 
@@ -281,7 +302,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 platform_impl.fs.writeFile(hp, rc) catch {};
                 const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
                 defer allocator.free(sm);
-                try platform_impl.writeStderr(sm);
+                try writeCheckoutSuccess(platform_impl, allocator, sm);
                 return;
             },
             error.InvalidStartPoint => {
@@ -386,7 +407,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
 
         const success_msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(success_msg);
-        try platform_impl.writeStdout(success_msg);
+        try writeCheckoutSuccess(platform_impl, allocator, success_msg);
     } else if (std.mem.eql(u8, effective_first_arg, "-B")) {
         // -B: create or reset branch
         const branch_name = args.next() orelse {
@@ -420,7 +441,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     platform_impl.fs.writeFile(head_path2, ref_content) catch {};
                     const reset_msg2 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
                     defer allocator.free(reset_msg2);
-                    try platform_impl.writeStderr(reset_msg2);
+                    try writeCheckoutSuccess(platform_impl, allocator, reset_msg2);
                     return;
                 },
                 else => return err,
@@ -463,7 +484,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
         
         const reset_msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
         defer allocator.free(reset_msg);
-        try platform_impl.writeStderr(reset_msg);
+        try writeCheckoutSuccess(platform_impl, allocator, reset_msg);
     } else if (std.mem.eql(u8, effective_first_arg, "--theirs") or std.mem.eql(u8, effective_first_arg, "--ours")) {
         // checkout --theirs/--ours <paths>: resolve conflicts using stage 2 (ours) or 3 (theirs)
         const want_stage: u16 = if (std.mem.eql(u8, effective_first_arg, "--ours")) 2 else 3;
@@ -582,7 +603,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                             platform_impl.fs.writeFile(hp, rc) catch {};
                             const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name_fb});
                             defer allocator.free(sm);
-                            try platform_impl.writeStderr(sm);
+                            try writeCheckoutSuccess(platform_impl, allocator, sm);
                             return;
                         },
                         error.InvalidStartPoint => {
@@ -602,7 +623,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                     }
                     const sm = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name_fb});
                     defer allocator.free(sm);
-                    try platform_impl.writeStderr(sm);
+                    try writeCheckoutSuccess(platform_impl, allocator, sm);
                     return;
                 } else {
                     target = arg;
@@ -733,7 +754,7 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 if (!quiet) {
                     const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}...\n", .{hash[0..7]});
                     defer allocator.free(det_msg);
-                    try platform_impl.writeStderr(det_msg);
+                    try writeCheckoutSuccess(platform_impl, allocator, det_msg);
                 }
                 return;
             } else {
@@ -840,11 +861,11 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
                 if (show_advice) {
                     const det_msg = try std.fmt.allocPrint(allocator, "Note: switching to '{s}'.\nHEAD is now at {s} {s}\n", .{ target, actual_target[0..7], commit_subj });
                     defer allocator.free(det_msg);
-                    try platform_impl.writeStderr(det_msg);
+                    try writeCheckoutSuccess(platform_impl, allocator, det_msg);
                 } else {
                     const det_msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s} {s}\n", .{ actual_target[0..7], commit_subj });
                     defer allocator.free(det_msg);
-                    try platform_impl.writeStderr(det_msg);
+                    try writeCheckoutSuccess(platform_impl, allocator, det_msg);
                 }
             }
             return;
@@ -1142,11 +1163,11 @@ pub fn cmdCheckout(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             if (std.fs.accessAbsolute(branch_ref_path, .{})) |_| {
                 const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{target});
                 defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try writeCheckoutSuccess(platform_impl, allocator, msg);
             } else |_| {
                 const msg = try std.fmt.allocPrint(allocator, "HEAD is now at {s}\n", .{target[0..@min(target.len, 7)]});
                 defer allocator.free(msg);
-                try platform_impl.writeStdout(msg);
+                try writeCheckoutSuccess(platform_impl, allocator, msg);
             }
         }
 
@@ -1304,7 +1325,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         std.fs.cwd().deleteFile(index_path) catch {};
         const msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{orphan_name});
         defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
+        try writeCheckoutSuccess(platform_impl, allocator, msg);
         return;
     }
     
@@ -1319,7 +1340,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     platform_impl.fs.writeFile(head_path2, ref_content2) catch {};
                     const msg2 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
                     defer allocator.free(msg2);
-                    try platform_impl.writeStderr(msg2);
+                    try writeCheckoutSuccess(platform_impl, allocator, msg2);
                     return;
                 },
                 else => return err,
@@ -1328,7 +1349,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch {};
         const msg = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
         defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
+        try writeCheckoutSuccess(platform_impl, allocator, msg);
         return;
     }
     
@@ -1348,7 +1369,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     platform_impl.fs.writeFile(head_path2, ref_content2) catch {};
                     const msg2 = try std.fmt.allocPrint(allocator, "Switched to a new branch '{s}'\n", .{branch_name});
                     defer allocator.free(msg2);
-                    try platform_impl.writeStderr(msg2);
+                    try writeCheckoutSuccess(platform_impl, allocator, msg2);
                     return;
                 },
                 else => return err,
@@ -1357,7 +1378,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         refs.updateHEAD(git_path, branch_name, platform_impl, allocator) catch {};
         const msg = try std.fmt.allocPrint(allocator, "Switched to and reset branch '{s}'\n", .{branch_name});
         defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
+        try writeCheckoutSuccess(platform_impl, allocator, msg);
         return;
     }
     
@@ -1394,7 +1415,7 @@ pub fn cmdSwitch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         applySmudgeFiltersPostCheckout(allocator, git_path, platform_impl, &filter_process_cache);
         const msg = try std.fmt.allocPrint(allocator, "Switched to branch '{s}'\n", .{t});
         defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
+        try writeCheckoutSuccess(platform_impl, allocator, msg);
     } else {
         try platform_impl.writeStderr("fatal: missing branch or commit argument\n");
         std.process.exit(128);
