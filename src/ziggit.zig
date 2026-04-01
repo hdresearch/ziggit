@@ -270,8 +270,8 @@ pub const Repository = struct {
     fn warmupCaches(self: *Repository) !void {
         // Pre-warm HEAD hash cache (2 file reads: HEAD + ref)
         _ = self.revParseHead() catch {};
-        // Skip index metadata warmup and tags — they're not needed for
-        // the common findCommit/checkout paths and will be cached lazily.
+        // Pre-warm pack/idx mmap for fast object lookups
+        self.prewarmPackCache() catch {};
     }
     
     /// Pre-warm index file metadata to speed up first status check
@@ -1830,11 +1830,17 @@ pub const Repository = struct {
 
         const path = try allocator.dupe(u8, target);
 
-        return Repository{
+        var repo = Repository{
             .path = path,
             .git_dir = git_dir,
             .allocator = allocator,
+            ._pack_only = true,
         };
+        if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
+        repo.prewarmPackCache() catch {};
+        return repo;
     }
 
     /// Clone from HTTPS URL into a bare repository
@@ -2151,11 +2157,17 @@ pub const Repository = struct {
 
         const path = try allocator.dupe(u8, target);
 
-        return Repository{
+        var repo = Repository{
             .path = path,
             .git_dir = git_dir,
             .allocator = allocator,
+            ._pack_only = true,
         };
+        if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
+        repo.prewarmPackCache() catch {};
+        return repo;
     }
 
     /// Clone from HTTPS URL into a non-bare repository without checking out files
