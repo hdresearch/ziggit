@@ -1730,13 +1730,6 @@ pub const Repository = struct {
     }
 
     pub fn cloneBare(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
-        if (comptime @import("builtin").os.tag == .linux) {
-            const trace_fd = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
-            if (trace_fd < 4096) {
-                _ = std.os.linux.write(@intCast(trace_fd), "cloneBare ENTER\n", 16);
-                _ = std.os.linux.close(@intCast(trace_fd));
-            }
-        }
         if (std.mem.startsWith(u8, source, "https://") or
             std.mem.startsWith(u8, source, "http://")) {
             return cloneBareHttps(allocator, source, target);
@@ -1890,13 +1883,6 @@ pub const Repository = struct {
 
     /// Clone from HTTPS URL into a bare repository
     fn cloneBareHttps(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
-        if (comptime @import("builtin").os.tag == .linux) {
-            const trace_fd = std.os.linux.open("/tmp/ziggit_net_trace.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
-            if (trace_fd < 4096) {
-                _ = std.os.linux.write(@intCast(trace_fd), "cloneBareHttps\n", 15);
-                _ = std.os.linux.close(@intCast(trace_fd));
-            }
-        }
         const smart_http = @import("git/smart_http.zig");
         const pack_writer = @import("git/pack_writer.zig");
         const idx_writer = @import("git/idx_writer.zig");
