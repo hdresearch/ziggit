@@ -28,10 +28,14 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         try platform_impl.writeStderr("status: not supported in freestanding mode\n");
         return;
     }
-    const allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
+    const backing_allocator = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi)
         std.heap.c_allocator
     else
         passed_allocator;
+    // Use arena allocator to batch-free all allocations at end
+    var arena_state = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
 
     // helpers.Check for flags
     var porcelain = false;
