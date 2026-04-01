@@ -511,6 +511,27 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
                 const first_line_end = std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len;
                 try out_buf.appendSlice(msg[0..first_line_end]);
                 try out_buf.append('\n');
+            } else if (succinct_mod.isEnabled()) {
+                // Succinct mode: compact one-line format
+                const short = if (commit_hash.len >= 7) commit_hash[0..7] else commit_hash;
+                const msg = helpers.extractObjectMessage(obj.data);
+                const first_line_end = std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len;
+                const subject = msg[0..first_line_end];
+                const trunc_subject = if (subject.len > 72) subject[0..69] else subject;
+                const ellipsis: []const u8 = if (subject.len > 72) "..." else "";
+                const author_field = helpers.extractHeaderField(obj.data, "author");
+                const a_name = if (author_field.len > 0) helpers.parseAuthorName(author_field) else "unknown";
+                const date_rel = if (author_field.len > 0) (helpers.parseAuthorDateRelative(author_field, allocator) catch "") else "";
+                defer if (date_rel.len > 0) allocator.free(date_rel);
+                try out_buf.appendSlice(short);
+                try out_buf.append(' ');
+                try out_buf.appendSlice(trunc_subject);
+                try out_buf.appendSlice(ellipsis);
+                try out_buf.appendSlice(" (");
+                try out_buf.appendSlice(date_rel);
+                try out_buf.appendSlice(") ");
+                try out_buf.appendSlice(a_name);
+                try out_buf.append('\n');
             } else {
                 // Default (medium) format
                 try out_buf.appendSlice("commit ");
