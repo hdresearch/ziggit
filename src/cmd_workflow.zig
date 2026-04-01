@@ -52,16 +52,21 @@ fn detectDefaultBranch() []const u8 {
         // Format: "ref: refs/remotes/origin/BRANCH"
         const prefix = "ref: refs/remotes/origin/";
         if (std.mem.startsWith(u8, content, prefix)) {
-            return content[prefix.len..];
+            const branch_name = content[prefix.len..];
+            // Return string literals to avoid dangling stack pointer
+            if (std.mem.eql(u8, branch_name, "master")) return "master";
+            if (std.mem.eql(u8, branch_name, "main")) return "main";
+            if (std.mem.eql(u8, branch_name, "develop")) return "develop";
+            // For unknown branch names, fall through to ref file check
         }
     } else |_| {}
 
     // Fallback: check which ref files exist
-    if (std.fs.cwd().access(".git/refs/remotes/origin/main", .{})) |_| {
-        return "main";
-    } else |_| {}
     if (std.fs.cwd().access(".git/refs/remotes/origin/master", .{})) |_| {
         return "master";
+    } else |_| {}
+    if (std.fs.cwd().access(".git/refs/remotes/origin/main", .{})) |_| {
+        return "main";
     } else |_| {}
 
     return "main";
@@ -137,7 +142,7 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
 
     // commit -m "DESCRIPTION"
     runSubcommand(allocator, &.{ "commit", "-m", message }) catch |e| {
-        printErr(allocator, "FAILED: commit (pre-commit hook?)\n", .{});
+        printErr(allocator, "FAILED: commit (nothing to commit, or pre-commit hook?)\n", .{});
         return e;
     };
 
