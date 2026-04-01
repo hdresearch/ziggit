@@ -453,20 +453,26 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, entry.path });
         defer allocator.free(full_path);
         
-        // helpers.Check if file exists in working directory
-        // Also check that no parent directory component is a symlink
-        // (e.g. if 'copy' was a dir but is now a symlink, 'copy/file' is deleted)
+        // OPTIMIZATION: Single stat call to check existence + get mtime/size
+        const file_stat_opt: ?std.fs.File.Stat = std.fs.cwd().statFile(full_path) catch |err| switch (err) {
+            error.FileNotFound, error.AccessDenied => null,
+            else => null,
+        };
+        
         const file_exists = file_exists_blk: {
-            if (!((platform_impl.fs.exists(full_path)) catch false)) break :file_exists_blk false;
-            // Check each parent component for symlinks
-            var path_to_check: []const u8 = entry.path;
-            while (std.fs.path.dirname(path_to_check)) |parent| {
-                if (parent.len == 0) break;
-                const parent_full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, parent }) catch break;
-                defer allocator.free(parent_full);
-                const lstat_result = std.posix.fstatat(std.posix.AT.FDCWD, parent_full, std.posix.AT.SYMLINK_NOFOLLOW) catch break;
-                if ((lstat_result.mode & std.posix.S.IFMT) == std.posix.S.IFLNK) break :file_exists_blk false;
-                path_to_check = parent;
+            if (file_stat_opt == null) break :file_exists_blk false;
+            // Only check parent symlinks when path has directory components
+            // (this is rare - only matters when a tracked dir was replaced by symlink)
+            if (std.mem.indexOfScalar(u8, entry.path, '/') != null) {
+                var path_to_check: []const u8 = entry.path;
+                while (std.fs.path.dirname(path_to_check)) |parent| {
+                    if (parent.len == 0) break;
+                    const parent_full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, parent }) catch break;
+                    defer allocator.free(parent_full);
+                    const lstat_result = std.posix.fstatat(std.posix.AT.FDCWD, parent_full, std.posix.AT.SYMLINK_NOFOLLOW) catch break;
+                    if ((lstat_result.mode & std.posix.S.IFMT) == std.posix.S.IFLNK) break :file_exists_blk false;
+                    path_to_check = parent;
+                }
             }
             break :file_exists_blk true;
         };
@@ -493,8 +499,8 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
         } else {
             const working_modified = blk: {
-                // OPTIMIZATION: Fast path using mtime/size before computing SHA-1
-                const file_stat = std.fs.cwd().statFile(full_path) catch break :blk false;
+                // OPTIMIZATION: Reuse stat from existence check (avoid second stat call)
+                const file_stat = file_stat_opt.?; // guaranteed non-null since file_exists is true
                 
                 // helpers.Compare mtime and size with index entry
                 const work_mtime_sec = @as(u32, @intCast(@divTrunc(file_stat.mtime, 1_000_000_000)));
