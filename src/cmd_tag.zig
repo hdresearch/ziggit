@@ -5,6 +5,7 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const cmd_tag = @import("cmd_tag.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -1086,6 +1087,21 @@ pub fn cmdTag(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pla
         }
 
         // Output
+        // Succinct mode: cap to 20 tags, no format/annotation support
+        if (succinct_mod.isEnabled() and format_str == null and n_lines == null) {
+            const max_show: usize = 20;
+            const show = @min(tag_list.items.len, max_show);
+            for (tag_list.items[0..show]) |tag| {
+                try platform_impl.writeStdout(tag);
+                try platform_impl.writeStdout("\n");
+            }
+            if (tag_list.items.len > max_show) {
+                const tmsg = try std.fmt.allocPrint(allocator, "... +{d} more\n", .{tag_list.items.len - max_show});
+                defer allocator.free(tmsg);
+                try platform_impl.writeStdout(tmsg);
+            }
+            return;
+        }
         for (tag_list.items) |tag| {
             if (format_str) |fmt| {
                 const formatted = expandFormat(allocator, fmt, tag, git_path, platform_impl) catch "";

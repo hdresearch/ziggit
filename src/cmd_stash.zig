@@ -5,6 +5,7 @@ const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
 const hooks = @import("git/hooks.zig");
+const succinct_mod = @import("succinct.zig");
 
 const objects = helpers.objects;
 const index_mod = helpers.index_mod;
@@ -926,10 +927,13 @@ fn stashPush(
     }
 
     if (!quiet) {
-        // Build the saved message
-        const saved_msg = try std.fmt.allocPrint(allocator, "Saved working directory and index state {s}\n", .{reflog_msg});
-        defer allocator.free(saved_msg);
-        try platform_impl.writeStderr(saved_msg);
+        if (succinct_mod.isEnabled()) {
+            try platform_impl.writeStderr("ok stash push\n");
+        } else {
+            const saved_msg = try std.fmt.allocPrint(allocator, "Saved working directory and index state {s}\n", .{reflog_msg});
+            defer allocator.free(saved_msg);
+            try platform_impl.writeStderr(saved_msg);
+        }
     }
 }
 
@@ -1066,9 +1070,20 @@ fn stashList(
         const stash_num = lines.items.len - 1 - idx;
         if (std.mem.indexOf(u8, line, "\t")) |tab_pos| {
             const msg = line[tab_pos + 1 ..];
-            const entry_str = try std.fmt.allocPrint(allocator, "stash@{{{d}}}: {s}\n", .{ stash_num, msg });
-            defer allocator.free(entry_str);
-            try platform_impl.writeStdout(entry_str);
+            if (succinct_mod.isEnabled()) {
+                // Strip "WIP on branch:" prefix for compact output
+                const compact_msg = if (std.mem.startsWith(u8, msg, "WIP on "))
+                    if (std.mem.indexOf(u8, msg, ": ")) |colon_pos| msg[colon_pos + 2 ..] else msg
+                else
+                    msg;
+                const entry_str = try std.fmt.allocPrint(allocator, "stash@{{{d}}}: {s}\n", .{ stash_num, compact_msg });
+                defer allocator.free(entry_str);
+                try platform_impl.writeStdout(entry_str);
+            } else {
+                const entry_str = try std.fmt.allocPrint(allocator, "stash@{{{d}}}: {s}\n", .{ stash_num, msg });
+                defer allocator.free(entry_str);
+                try platform_impl.writeStdout(entry_str);
+            }
         }
         count += 1;
     }
@@ -1850,11 +1865,19 @@ fn stashApply(
     }
 
     if (!quiet) {
-        const head_branch = getCurrentBranch(allocator, git_path, platform_impl) catch try allocator.dupe(u8, "HEAD");
-        defer allocator.free(head_branch);
-        const msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{head_branch});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
+        if (succinct_mod.isEnabled()) {
+            if (is_pop) {
+                try platform_impl.writeStdout("ok stash pop\n");
+            } else {
+                try platform_impl.writeStdout("ok stash apply\n");
+            }
+        } else {
+            const head_branch = getCurrentBranch(allocator, git_path, platform_impl) catch try allocator.dupe(u8, "HEAD");
+            defer allocator.free(head_branch);
+            const msg = try std.fmt.allocPrint(allocator, "On branch {s}\n", .{head_branch});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
     }
 
     // Run post-checkout hook after stash apply/pop restores working tree
@@ -2114,9 +2137,13 @@ fn stashDrop(
     };
 
     if (!quiet) {
-        const msg = try std.fmt.allocPrint(allocator, "Dropped {s} ({s})\n", .{ stash_ref, stash_hash });
-        defer allocator.free(msg);
-        try platform_impl.writeStderr(msg);
+        if (succinct_mod.isEnabled()) {
+            try platform_impl.writeStderr("ok stash drop\n");
+        } else {
+            const msg = try std.fmt.allocPrint(allocator, "Dropped {s} ({s})\n", .{ stash_ref, stash_hash });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+        }
     }
 }
 
