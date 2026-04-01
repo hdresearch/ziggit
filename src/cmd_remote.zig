@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 const fetch_cmd = helpers.fetch_cmd;
 const cmd_clone = @import("cmd_clone.zig");
 
@@ -623,9 +624,16 @@ pub fn listRemotes(git_path: []const u8, verbose: bool, platform_impl: *const pl
         else if (current_remote != null and std.mem.startsWith(u8, trimmed, "url = ")) {
             const url = trimmed["url = ".len..];
             if (verbose) {
-                const output = try std.fmt.allocPrint(allocator, "{s}\t{s} (fetch)\n{s}\t{s} (push)\n", .{current_remote.?, url, current_remote.?, url});
-                defer allocator.free(output);
-                try platform_impl.writeStdout(output);
+                if (succinct_mod.isEnabled()) {
+                    // Succinct mode: REMOTE URL (no fetch/push duplication)
+                    const output = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{current_remote.?, url});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                } else {
+                    const output = try std.fmt.allocPrint(allocator, "{s}\t{s} (fetch)\n{s}\t{s} (push)\n", .{current_remote.?, url, current_remote.?, url});
+                    defer allocator.free(output);
+                    try platform_impl.writeStdout(output);
+                }
             } else {
                 const output = try std.fmt.allocPrint(allocator, "{s}\n", .{current_remote.?});
                 defer allocator.free(output);
