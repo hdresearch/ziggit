@@ -3372,9 +3372,23 @@ pub const Repository = struct {
 
     /// Resolve a pack object at offset returning only content (no header).
     /// Used by delta resolution to avoid header construction at every chain level.
+    /// OPTIMIZATION: Uses delta cache to avoid re-decompressing base objects during
+    /// checkout when multiple deltas share the same base.
     fn resolvePackContentOnly(self: *Repository, pack_data: []const u8, offset: u64) ObjectReadError![]u8 {
         if (offset >= pack_data.len) return error.InvalidPackOffset;
         const fa = self._fast_alloc;
+
+        // Check delta cache first (reuses cache from readPackObjectFromData)
+        for (self._delta_cache_offsets, 0..) |cached_off, i| {
+            if (cached_off == offset and self._delta_cache_data[i] != null) {
+                // Cache hit — extract content (strip "type size\0" header)
+                const cached = self._delta_cache_data[i].?;
+                const null_pos = std.mem.indexOfScalar(u8, cached, 0) orelse {
+                    return fa.dupe(u8, cached) catch return error.ObjectNotFound;
+                };
+                return fa.dupe(u8, cached[null_pos + 1 ..]) catch return error.ObjectNotFound;
+            }
+        }
 
         var pos = @as(usize, offset);
         const first_byte = pack_data[pos];
@@ -3390,15 +3404,37 @@ pub const Repository = struct {
             pos += 1;
         }
 
-        switch (obj_type_raw) {
-            1, 2, 3, 4 => {
-                return objects_mod.cDecompressSlice(fa, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
-                    (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject);
-            },
-            6 => return self.resolveOfsDeltaContentOnly(pack_data, pos, obj_size, offset),
-            7 => return self.resolveRefDeltaContentOnly(pack_data, pos, obj_size),
+        const result = switch (obj_type_raw) {
+            1, 2, 3, 4 => objects_mod.cDecompressSlice(fa, pack_data[pos..], @as(usize, @intCast(obj_size))) orelse
+                (zlib_compat.decompressSlice(fa, pack_data[pos..]) catch return error.CorruptObject),
+            6 => try self.resolveOfsDeltaContentOnly(pack_data, pos, obj_size, offset),
+            7 => try self.resolveRefDeltaContentOnly(pack_data, pos, obj_size),
             else => return error.InvalidPackObject,
+        };
+
+        // Cache resolved content for delta chain reuse (< 256KB)
+        if (result.len < 256 * 1024) {
+            // Build "type size\0content" for the cache (compatible with readPackObjectFromData cache)
+            const type_name: []const u8 = switch (obj_type_raw) {
+                1 => "commit",
+                2 => "tree",
+                3 => "blob",
+                4 => "tag",
+                else => "blob",
+            };
+            var hdr_buf: [64]u8 = undefined;
+            const header = std.fmt.bufPrint(&hdr_buf, "{s} {}\x00", .{ type_name, result.len }) catch return result;
+            const full = fa.alloc(u8, header.len + result.len) catch return result;
+            @memcpy(full[0..header.len], header);
+            @memcpy(full[header.len..], result);
+            const idx = self._delta_cache_next;
+            if (self._delta_cache_data[idx]) |old| fa.free(old);
+            self._delta_cache_data[idx] = full;
+            self._delta_cache_offsets[idx] = offset;
+            self._delta_cache_next +%= 1;
         }
+
+        return result;
     }
 
     fn updateIndexFromTree(self: *Repository, tree_hash: *const [40]u8) !void {
