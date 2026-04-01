@@ -1226,32 +1226,20 @@ fn pushSingleRefspec(
     }
     
     // Output success message for succinct mode
-    if (!dry_run and succinct_mod.isEnabled()) {
-        // Check if this was actually an update (not up-to-date)
-        var was_update = true;
-        if (readFileContent(allocator, std.fmt.allocPrint(allocator, "{s}/{s}", .{ remote_git_dir, full_dst }) catch "")) |old| {
-            defer allocator.free(old);
-            const old_h = std.mem.trim(u8, old, " \t\r\n");
-            if (old_h.len >= 40 and std.mem.eql(u8, old_h[0..40], hash)) {
-                was_update = false; // up-to-date
-            }
-        } else |_| {}
+    if (!dry_run and succinct_mod.isEnabled() and is_update_for_succinct) {
+        // Extract branch name for output
+        const branch_name = if (std.mem.startsWith(u8, full_dst, "refs/heads/"))
+            full_dst["refs/heads/".len..]
+        else if (std.mem.startsWith(u8, full_dst, "refs/tags/"))
+            full_dst["refs/tags/".len..]
+        else
+            full_dst;
         
-        if (was_update) {
-            // Extract branch name for output
-            const branch_name = if (std.mem.startsWith(u8, full_dst, "refs/heads/"))
-                full_dst["refs/heads/".len..]
-            else if (std.mem.startsWith(u8, full_dst, "refs/tags/"))
-                full_dst["refs/tags/".len..]
-            else
-                full_dst;
-            
-            const short_hash = if (hash.len >= 7) hash[0..7] else hash;
-            const success_msg = std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, short_hash }) catch "";
-            if (success_msg.len > 0) {
-                defer allocator.free(success_msg);
-                platform_impl.writeStdout(success_msg) catch {};
-            }
+        const short_hash = if (hash.len >= 7) hash[0..7] else hash;
+        const success_msg = std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, short_hash }) catch "";
+        if (success_msg.len > 0) {
+            defer allocator.free(success_msg);
+            platform_impl.writeStdout(success_msg) catch {};
         }
     }
 
