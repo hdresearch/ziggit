@@ -9,6 +9,7 @@ const diff_stats = @import("diff_stats.zig");
 const mc = @import("../main_common.zig");
 const config_helpers = @import("config_helpers.zig");
 const hooks = @import("../git/hooks.zig");
+const succinct_mod = @import("../succinct.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -475,7 +476,11 @@ pub fn cmdMerge(allocator: Allocator, args: *pm.ArgIterator, platform_impl: *con
         }
 
         if (non_merged.items.len == 0) {
-            writeStdout(platform_impl, "Already up to date.\n");
+            if (succinct_mod.isEnabled()) {
+                writeStdout(platform_impl, "ok merge (up to date)\n");
+            } else {
+                writeStdout(platform_impl, "Already up to date.\n");
+            }
             return;
         }
 
@@ -794,6 +799,28 @@ fn isTruthy(val: []const u8) bool {
         std.ascii.eqlIgnoreCase(val, "yes") or
         std.ascii.eqlIgnoreCase(val, "on") or
         std.mem.eql(u8, val, "1");
+}
+
+fn extractBranchName(target: []const u8, allocator: Allocator) []const u8 {
+    // If target is a hash, return short hash
+    if (target.len == 40) {
+        return target[0..@min(7, target.len)];
+    }
+    // If it's a branch ref, extract the branch name
+    if (std.mem.startsWith(u8, target, "refs/heads/")) {
+        return target["refs/heads/".len..];
+    }
+    // If it's a remote ref, extract the name
+    if (std.mem.startsWith(u8, target, "refs/remotes/")) {
+        return target["refs/remotes/".len..];
+    }
+    // If it's a tag, extract the tag name
+    if (std.mem.startsWith(u8, target, "refs/tags/")) {
+        return target["refs/tags/".len..];
+    }
+    // Return as is
+    _ = allocator;
+    return target;
 }
 
 fn invokeEditor(git_path: []const u8, message: []const u8, allocator: Allocator) ?[]u8 {
@@ -1195,7 +1222,11 @@ fn doContinue(git_path: []const u8, opts: *MergeOpts, allocator: Allocator, plat
     createMergeCommit(git_path, current_hash.?, target_hash, current_branch, msg, allocator, platform_impl);
 
     cleanMergeState(git_path, allocator);
-    writeStdout(platform_impl, "Merge made by the 'ort' strategy.\n");
+    if (succinct_mod.isEnabled()) {
+        writeStdout(platform_impl, "ok merge continue\n");
+    } else {
+        writeStdout(platform_impl, "Merge made by the 'ort' strategy.\n");
+    }
     // [already-up-to-date handled earlier, so not reached here for that case]
 }
 
@@ -1229,15 +1260,14 @@ fn doUnbornMerge(git_path: []const u8, current_branch: []const u8, target_hash: 
     const full_ref = std.fmt.allocPrint(allocator, "refs/heads/{s}", .{current_branch}) catch return;
     defer allocator.free(full_ref);
     writeReflogEntry(git_path, full_ref, zero_hash, target_hash, "initial pull", allocator, platform_impl);
-    writeStdout(platform_impl, "Fast-forward\n");
+    if (succinct_mod.isEnabled()) {
+        writeStdout(platform_impl, "ok merge (initial)\n");
+    } else {
+        writeStdout(platform_impl, "Fast-forward\n");
+    }
 }
 
 fn doFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, merge_target_name: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
-    // Show "Updating FROM..TO" line first
-    const updating_msg = std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ current_hash[0..@min(7, current_hash.len)], target_hash[0..@min(7, target_hash.len)] }) catch "";
-    defer if (updating_msg.len > 0) allocator.free(updating_msg);
-    writeStdout(platform_impl, updating_msg);
-
     // Update ref
     refs.updateRef(git_path, current_branch, target_hash, platform_impl, allocator) catch {
         writeStderr(platform_impl, "fatal: unable to update ref\n");
@@ -1247,12 +1277,23 @@ fn doFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []
     // Checkout the new tree
     checkoutTree(git_path, target_hash, allocator, platform_impl);
 
-    writeStdout(platform_impl, "Fast-forward\n");
+    if (succinct_mod.isEnabled()) {
+        const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{merge_target_name}) catch "ok merge\n";
+        defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+        writeStdout(platform_impl, msg);
+    } else {
+        // Show "Updating FROM..TO" line first
+        const updating_msg = std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ current_hash[0..@min(7, current_hash.len)], target_hash[0..@min(7, target_hash.len)] }) catch "";
+        defer if (updating_msg.len > 0) allocator.free(updating_msg);
+        writeStdout(platform_impl, updating_msg);
 
-    // Show diffstat if enabled
-    const show_stat = opts.stat orelse true;
-    if (show_stat and !opts.quiet) {
-        showDiffstatCompact(git_path, current_hash, target_hash, opts.compact_summary, allocator, platform_impl);
+        writeStdout(platform_impl, "Fast-forward\n");
+
+        // Show diffstat if enabled
+        const show_stat = opts.stat orelse true;
+        if (show_stat and !opts.quiet) {
+            showDiffstatCompact(git_path, current_hash, target_hash, opts.compact_summary, allocator, platform_impl);
+        }
     }
 
     // Write reflog
@@ -1267,17 +1308,25 @@ fn doFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []
 fn doSquashFastForward(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, merge_target: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
     _ = current_branch;
     // Checkout target tree but don't create commit or update HEAD
-    const updating_msg = std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ current_hash[0..@min(7, current_hash.len)], target_hash[0..@min(7, target_hash.len)] }) catch "";
-    defer if (updating_msg.len > 0) allocator.free(updating_msg);
-    writeStdout(platform_impl, updating_msg);
-    writeStdout(platform_impl, "Fast-forward\n");
-
     checkoutTreeNoHead(git_path, target_hash, allocator, platform_impl);
 
-    // Show diffstat
-    const show_stat = opts.stat orelse true;
-    if (show_stat and !opts.quiet) {
-        showDiffstatCompact(git_path, current_hash, target_hash, opts.compact_summary, allocator, platform_impl);
+    if (succinct_mod.isEnabled()) {
+        const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{merge_target}) catch "ok merge\n";
+        defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+        writeStdout(platform_impl, msg);
+    } else {
+        const updating_msg = std.fmt.allocPrint(allocator, "Updating {s}..{s}\n", .{ current_hash[0..@min(7, current_hash.len)], target_hash[0..@min(7, target_hash.len)] }) catch "";
+        defer if (updating_msg.len > 0) allocator.free(updating_msg);
+        writeStdout(platform_impl, updating_msg);
+        writeStdout(platform_impl, "Fast-forward\n");
+
+        // Show diffstat
+        const show_stat = opts.stat orelse true;
+        if (show_stat and !opts.quiet) {
+            showDiffstatCompact(git_path, current_hash, target_hash, opts.compact_summary, allocator, platform_impl);
+        }
+
+        writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
     }
 
     // Write SQUASH_MSG
@@ -1288,8 +1337,6 @@ fn doSquashFastForward(git_path: []const u8, current_hash: []const u8, target_ha
         defer allocator.free(squash_path);
         platform_impl.fs.writeFile(squash_path, squash_msg) catch {};
     }
-
-    writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
 }
 
 fn doSquashMerge(git_path: []const u8, current_hash: []const u8, target_hash: []const u8, current_branch: []const u8, merge_target: []const u8, opts: *MergeOpts, allocator: Allocator, platform_impl: *const pm.Platform) void {
@@ -1328,11 +1375,23 @@ fn doSquashMerge(git_path: []const u8, current_hash: []const u8, target_hash: []
 
     if (conflicts) {
         // Write merge state for conflict resolution
-        writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
-        writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
+        if (succinct_mod.isEnabled()) {
+            const msg = std.fmt.allocPrint(allocator, "conflict merge {s} {d} files\n", .{ merge_target, conflict_files.items.len }) catch "conflict merge\n";
+            defer if (!std.mem.eql(u8, msg, "conflict merge\n")) allocator.free(msg);
+            writeStderr(platform_impl, msg);
+        } else {
+            writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
+            writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
+        }
         std.process.exit(1);
     } else {
-        writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
+        if (succinct_mod.isEnabled()) {
+            const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{merge_target}) catch "ok merge\n";
+            defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+            writeStdout(platform_impl, msg);
+        } else {
+            writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
+        }
     }
 }
 
@@ -1397,7 +1456,13 @@ fn doOursStrategy(git_path: []const u8, current_hash: []const u8, target_hash: [
         }
     }
 
-    writeStdout(platform_impl, "Merge made by the 'ours' strategy.\n");
+    if (succinct_mod.isEnabled()) {
+        const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{merge_target}) catch "ok merge\n";
+        defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+        writeStdout(platform_impl, msg);
+    } else {
+        writeStdout(platform_impl, "Merge made by the 'ours' strategy.\n");
+    }
 
     // Run post-merge hook (squash=0 for normal merge)
     runPostMergeHook(git_path, false, allocator, platform_impl);
@@ -1422,13 +1487,25 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     if (conflicts) {
         // Write merge state with conflict info
         writeMergeStateWithConflicts(git_path, target_hash, merge_msg, conflict_files.items, opts.cleanup, allocator, platform_impl);
-        writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
+        if (succinct_mod.isEnabled()) {
+            const msg = std.fmt.allocPrint(allocator, "conflict merge {s} {d} files\n", .{ merge_target, conflict_files.items.len }) catch "conflict merge\n";
+            defer if (!std.mem.eql(u8, msg, "conflict merge\n")) allocator.free(msg);
+            writeStderr(platform_impl, msg);
+        } else {
+            writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
+        }
         std.process.exit(1);
     }
 
     if (opts.no_commit) {
         writeMergeState(git_path, target_hash, merge_msg, allocator, platform_impl);
-        writeStdout(platform_impl, "Automatic merge went well; stopped before committing as requested\n");
+        if (succinct_mod.isEnabled()) {
+            const msg = std.fmt.allocPrint(allocator, "ok merge {s} (no-commit)\n", .{merge_target}) catch "ok merge (no-commit)\n";
+            defer if (!std.mem.eql(u8, msg, "ok merge (no-commit)\n")) allocator.free(msg);
+            writeStdout(platform_impl, msg);
+        } else {
+            writeStdout(platform_impl, "Automatic merge went well; stopped before committing as requested\n");
+        }
         return;
     }
 
@@ -1485,25 +1562,31 @@ fn doThreeWayMerge(git_path: []const u8, current_hash: []const u8, target_hash: 
     // Clean up merge state files after successful commit
     cleanupMergeState(git_path, allocator);
 
-    // Output strategy name first, then diffstat (matching real git order)
-    if (opts.strategy) |strat| {
-        if (std.mem.eql(u8, strat, "resolve")) {
-            writeStdout(platform_impl, "Wonderful.\n");
-        }
-        const strat_msg = std.fmt.allocPrint(allocator, "Merge made by the '{s}' strategy.\n", .{strat}) catch "Merge made by the 'ort' strategy.\n";
-        defer if (!std.mem.eql(u8, strat_msg, "Merge made by the 'ort' strategy.\n")) allocator.free(strat_msg);
-        writeStdout(platform_impl, strat_msg);
+    if (succinct_mod.isEnabled()) {
+        const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{merge_target}) catch "ok merge\n";
+        defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+        writeStdout(platform_impl, msg);
     } else {
-        writeStdout(platform_impl, "Merge made by the 'ort' strategy.\n");
-    }
+        // Output strategy name first, then diffstat (matching real git order)
+        if (opts.strategy) |strat| {
+            if (std.mem.eql(u8, strat, "resolve")) {
+                writeStdout(platform_impl, "Wonderful.\n");
+            }
+            const strat_msg = std.fmt.allocPrint(allocator, "Merge made by the '{s}' strategy.\n", .{strat}) catch "Merge made by the 'ort' strategy.\n";
+            defer if (!std.mem.eql(u8, strat_msg, "Merge made by the 'ort' strategy.\n")) allocator.free(strat_msg);
+            writeStdout(platform_impl, strat_msg);
+        } else {
+            writeStdout(platform_impl, "Merge made by the 'ort' strategy.\n");
+        }
 
-    // Show diffstat (compare old HEAD to new merge commit)
-    const show_stat = opts.stat orelse true;
-    if (show_stat and !opts.quiet) {
-        const new_head = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
-        defer if (new_head) |h| allocator.free(h);
-        if (new_head) |nh| {
-            showDiffstatCompact(git_path, current_hash, nh, opts.compact_summary, allocator, platform_impl);
+        // Show diffstat (compare old HEAD to new merge commit)
+        const show_stat = opts.stat orelse true;
+        if (show_stat and !opts.quiet) {
+            const new_head = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
+            defer if (new_head) |h| allocator.free(h);
+            if (new_head) |nh| {
+                showDiffstatCompact(git_path, current_hash, nh, opts.compact_summary, allocator, platform_impl);
+            }
         }
     }
 
@@ -1550,18 +1633,22 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
         const pretty_name = if (target_idx < reduced_names.items.len) reduced_names.items[target_idx] else target_hash[0..@min(7, target_hash.len)];
 
         if (isAncestor(git_path, head, target_hash, allocator, platform_impl) catch false) {
-            // Fast-forward - print ff message instead of "Trying"
-            const ff_msg = std.fmt.allocPrint(allocator, "Fast-forwarding to: {s}\n", .{pretty_name}) catch "";
-            defer if (ff_msg.len > 0) allocator.free(ff_msg);
-            writeStdout(platform_impl, ff_msg);
+            // Fast-forward - print ff message in verbose mode only
+            if (!succinct_mod.isEnabled()) {
+                const ff_msg = std.fmt.allocPrint(allocator, "Fast-forwarding to: {s}\n", .{pretty_name}) catch "";
+                defer if (ff_msg.len > 0) allocator.free(ff_msg);
+                writeStdout(platform_impl, ff_msg);
+            }
             checkoutTree(git_path, target_hash, allocator, platform_impl);
             allocator.free(head);
             head = allocator.dupe(u8, target_hash) catch return;
         } else {
-            // Print "Trying simple merge with X"
-            const trying_msg = std.fmt.allocPrint(allocator, "Trying simple merge with {s}\n", .{pretty_name}) catch "";
-            defer if (trying_msg.len > 0) allocator.free(trying_msg);
-            writeStdout(platform_impl, trying_msg);
+            // Print "Trying simple merge with X" in verbose mode only
+            if (!succinct_mod.isEnabled()) {
+                const trying_msg = std.fmt.allocPrint(allocator, "Trying simple merge with {s}\n", .{pretty_name}) catch "";
+                defer if (trying_msg.len > 0) allocator.free(trying_msg);
+                writeStdout(platform_impl, trying_msg);
+            }
             // Actual 3-way merge needed
             const merge_base = findMergeBase(git_path, head, target_hash, allocator, platform_impl) catch null;
             defer if (merge_base) |b| allocator.free(b);
@@ -1622,7 +1709,19 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
                 }
                 // Update ref to the ff'd head so commit picks up right first parent
                 refs.updateRef(git_path, current_branch, head, platform_impl, allocator) catch {};
-                writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
+                if (succinct_mod.isEnabled()) {
+                    var targets_str = std.array_list.Managed(u8).init(allocator);
+                    defer targets_str.deinit();
+                    for (opts.targets.items, 0..) |t, i| {
+                        if (i > 0) targets_str.appendSlice(" ") catch {};
+                        targets_str.appendSlice(t) catch {};
+                    }
+                    const msg = std.fmt.allocPrint(allocator, "conflict merge {s}\n", .{targets_str.items}) catch "conflict merge\n";
+                    defer if (!std.mem.eql(u8, msg, "conflict merge\n")) allocator.free(msg);
+                    writeStderr(platform_impl, msg);
+                } else {
+                    writeStderr(platform_impl, "Automatic merge failed; fix conflicts and then commit the result.\n");
+                }
                 allocator.free(head);
                 std.process.exit(1);
             }
@@ -1677,7 +1776,19 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
             };
             defer allocator.free(squash_path);
             platform_impl.fs.writeFile(squash_path, squash_buf.items) catch {};
-            writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
+            if (succinct_mod.isEnabled()) {
+                var targets_str = std.array_list.Managed(u8).init(allocator);
+                defer targets_str.deinit();
+                for (opts.targets.items, 0..) |t, i| {
+                    if (i > 0) targets_str.appendSlice(" ") catch {};
+                    targets_str.appendSlice(t) catch {};
+                }
+                const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{targets_str.items}) catch "ok merge\n";
+                defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+                writeStdout(platform_impl, msg);
+            } else {
+                writeStdout(platform_impl, "Squash commit -- not updating HEAD\n");
+            }
         } else {
             // Write MERGE_HEAD with all target hashes
             var mh_buf = std.array_list.Managed(u8).init(allocator);
@@ -1716,7 +1827,19 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
             defer allocator.free(mode_path);
             platform_impl.fs.writeFile(mode_path, "") catch {};
 
-            writeStdout(platform_impl, "Automatic merge went well; stopped before committing as requested\n");
+            if (succinct_mod.isEnabled()) {
+                var targets_str = std.array_list.Managed(u8).init(allocator);
+                defer targets_str.deinit();
+                for (opts.targets.items, 0..) |t, i| {
+                    if (i > 0) targets_str.appendSlice(" ") catch {};
+                    targets_str.appendSlice(t) catch {};
+                }
+                const msg = std.fmt.allocPrint(allocator, "ok merge {s} (no-commit)\n", .{targets_str.items}) catch "ok merge (no-commit)\n";
+                defer if (!std.mem.eql(u8, msg, "ok merge (no-commit)\n")) allocator.free(msg);
+                writeStdout(platform_impl, msg);
+            } else {
+                writeStdout(platform_impl, "Automatic merge went well; stopped before committing as requested\n");
+            }
         }
         allocator.free(head);
         return;
@@ -1766,11 +1889,23 @@ fn doOctopusMerge(git_path: []const u8, current_hash: []const u8, current_branch
     }
     allocator.free(head);
 
-    writeStdout(platform_impl, "Merge made by the 'octopus' strategy.\n");
+    if (succinct_mod.isEnabled()) {
+        var targets_str = std.array_list.Managed(u8).init(allocator);
+        defer targets_str.deinit();
+        for (opts.targets.items, 0..) |t, i| {
+            if (i > 0) targets_str.appendSlice(" ") catch {};
+            targets_str.appendSlice(t) catch {};
+        }
+        const msg = std.fmt.allocPrint(allocator, "ok merge {s}\n", .{targets_str.items}) catch "ok merge\n";
+        defer if (!std.mem.eql(u8, msg, "ok merge\n")) allocator.free(msg);
+        writeStdout(platform_impl, msg);
+    } else {
+        writeStdout(platform_impl, "Merge made by the 'octopus' strategy.\n");
+    }
 
     // Show diffstat (compare original HEAD to final merge result)
     const show_stat = opts.stat orelse true;
-    if (show_stat and !opts.quiet) {
+    if (show_stat and !opts.quiet and !succinct_mod.isEnabled()) {
         const new_head = refs.getCurrentCommit(git_path, platform_impl, allocator) catch null;
         defer if (new_head) |h| allocator.free(h);
         if (new_head) |nh| {
