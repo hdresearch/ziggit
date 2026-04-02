@@ -4,7 +4,7 @@
 
 A modern git implementation written in pure Zig. Drop-in replacement for `git` — use `ziggit` wherever you'd use `git`.
 
-**4–10× faster** than git on macOS arm64, compiles to a **142KB WebAssembly** binary, and includes a **succinct mode** that cuts LLM token usage by 70–95%.
+**4–10× faster** than git on macOS arm64, compiles to a **142KB WebAssembly** binary, and includes a **succinct mode** that cuts LLM token usage by 70–95%. Supports push/pull over HTTPS to GitHub and other git hosts.
 
 ## Install
 
