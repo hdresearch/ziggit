@@ -194,13 +194,13 @@ pub fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: u
     
     for (to_remove.items) |path| {
         if (dry_run) {
-            if (!quiet) {
+            if (!quiet and !succinct_mod.isEnabled()) {
                 const m = std.fmt.allocPrint(allocator, "Would remove {s}\n", .{path}) catch continue;
                 defer allocator.free(m);
                 platform_impl.writeStdout(m) catch {};
             }
         } else {
-            if (!quiet) {
+            if (!quiet and !succinct_mod.isEnabled()) {
                 const m = std.fmt.allocPrint(allocator, "Removing {s}\n", .{path}) catch continue;
                 defer allocator.free(m);
                 platform_impl.writeStdout(m) catch {};
@@ -214,5 +214,12 @@ pub fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: u
                 }
             }
         }
+    }
+    
+    // Succinct mode summary
+    if (succinct_mod.isEnabled() and !quiet and to_remove.items.len > 0) {
+        const msg = std.fmt.allocPrint(allocator, "ok clean {d} files\n", .{to_remove.items.len}) catch return;
+        defer allocator.free(msg);
+        platform_impl.writeStdout(msg) catch {};
     }
 }
