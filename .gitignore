@@ -3,3 +3,10 @@ zig-out/
 node_modules/
 libziggit.a
 .vers/
+hello
+hello.o
+test.o
+main
+/ziggit
+zig-out/
+.zig-cache/
