@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -155,7 +156,7 @@ pub fn nativeCmdMv(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator
             for (new_entries.items) |e| try index.entries.append(e);
         }
         
-        if (verbose or dry_run) {
+        if ((verbose or dry_run) and !succinct_mod.isEnabled()) {
             const msg = try std.fmt.allocPrint(allocator, "Renaming {s} to {s}\n", .{ src, target });
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);

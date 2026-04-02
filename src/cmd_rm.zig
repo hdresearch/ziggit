@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -155,7 +156,7 @@ pub fn cmdRm(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, plat
 
     // helpers.Output removed files and remove from working tree
     for (removed_paths.items) |path| {
-        if (!quiet) {
+        if (!quiet and !succinct_mod.isEnabled()) {
             const msg = try std.fmt.allocPrint(allocator, "rm '{s}'\n", .{path});
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
