@@ -1,4 +1,6 @@
-# ziggit
+<p align="center">
+  <img src="ziggit-logo.png" alt="ziggit" width="400">
+</p>
 
 A modern git implementation written in pure Zig. Drop-in replacement for `git` — use `ziggit` wherever you'd use `git`.
 
