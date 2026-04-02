@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -208,13 +209,70 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
                         }
                         buf_writer.writeByte('\n') catch {};
                     } else {
-                        // Write directly: "<short_sha> <ref>@{<seq>}: <msg>\n"
-                        buf_writer.writeAll(new_sha[0..@min(7, new_sha.len)]) catch continue;
-                        buf_writer.writeByte(' ') catch continue;
-                        buf_writer.writeAll(ref_name) catch continue;
-                        buf_writer.print("@{{{d}}}: ", .{seq}) catch continue;
-                        buf_writer.writeAll(msg) catch continue;
-                        buf_writer.writeByte('\n') catch continue;
+                        if (succinct_mod.isEnabled()) {
+                            // Succinct format: "HASH action (relative-date)"
+                            buf_writer.writeAll(new_sha[0..@min(7, new_sha.len)]) catch continue;
+                            buf_writer.writeByte(' ') catch continue;
+                            buf_writer.writeAll(msg) catch continue;
+                            buf_writer.writeAll(" (") catch continue;
+                            
+                            // Parse timestamp from line format: <old-sha1> <new-sha1> <author> <timestamp> <tz>
+                            const header = line[0..tab];
+                            var parts = std.mem.splitScalar(u8, header, ' ');
+                            _ = parts.next(); // old-sha1
+                            _ = parts.next(); // new-sha1
+                            // Skip author (name and email)
+                            var timestamp_str: ?[]const u8 = null;
+                            var part_count: usize = 0;
+                            while (parts.next()) |part| {
+                                part_count += 1;
+                                // Timestamp is usually the last or second-to-last space-separated part before tab
+                                // Look for a numeric timestamp (all digits)
+                                if (part.len > 0 and std.ascii.isDigit(part[0])) {
+                                    var all_digits = true;
+                                    for (part) |c| {
+                                        if (!std.ascii.isDigit(c)) {
+                                            all_digits = false;
+                                            break;
+                                        }
+                                    }
+                                    if (all_digits and part.len > 8) { // timestamps are long numbers
+                                        timestamp_str = part;
+                                    }
+                                }
+                            }
+                            
+                            if (timestamp_str) |ts| {
+                                const timestamp = std.fmt.parseInt(i64, ts, 10) catch 0;
+                                if (timestamp > 0) {
+                                    const now = std.time.timestamp();
+                                    const diff = now - timestamp;
+                                    if (diff < 60) {
+                                        buf_writer.print("{d} seconds ago", .{diff}) catch continue;
+                                    } else if (diff < 3600) {
+                                        buf_writer.print("{d} minutes ago", .{diff / 60}) catch continue;
+                                    } else if (diff < 86400) {
+                                        buf_writer.print("{d} hours ago", .{diff / 3600}) catch continue;
+                                    } else {
+                                        buf_writer.print("{d} days ago", .{diff / 86400}) catch continue;
+                                    }
+                                } else {
+                                    buf_writer.writeAll("unknown time") catch continue;
+                                }
+                            } else {
+                                buf_writer.writeAll("unknown time") catch continue;
+                            }
+                            buf_writer.writeByte(')') catch continue;
+                            buf_writer.writeByte('\n') catch continue;
+                        } else {
+                            // Write directly: "<short_sha> <ref>@{<seq>}: <msg>\n"
+                            buf_writer.writeAll(new_sha[0..@min(7, new_sha.len)]) catch continue;
+                            buf_writer.writeByte(' ') catch continue;
+                            buf_writer.writeAll(ref_name) catch continue;
+                            buf_writer.print("@{{{d}}}: ", .{seq}) catch continue;
+                            buf_writer.writeAll(msg) catch continue;
+                            buf_writer.writeByte('\n') catch continue;
+                        }
                     }
                     output_count += 1;
                 }
