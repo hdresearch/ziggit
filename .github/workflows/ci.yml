@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build
+
+      - name: Build ReleaseFast
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Build WASM
+        run: zig build --step wasm
+
+      - name: Smoke test
+        run: |
+          ./zig-out/bin/ziggit --version
+          ./zig-out/bin/ziggit init /tmp/test-repo
+          cd /tmp/test-repo
+          $GITHUB_WORKSPACE/zig-out/bin/ziggit status
