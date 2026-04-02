@@ -8,26 +8,47 @@ A modern git implementation written in pure Zig. Drop-in replacement for `git` â
 
 ## Install
 
-### From source (recommended)
+### Download a release (easiest)
+
+Grab the latest binary for your platform from [GitHub Releases](https://github.com/hdresearch/ziggit/releases/latest):
+
+**macOS (Apple Silicon):**
+```bash
+curl -fsSL https://github.com/hdresearch/ziggit/releases/latest/download/ziggit-macos-aarch64 -o ziggit
+chmod +x ziggit
+sudo mv ziggit /usr/local/bin/
+```
+
+**macOS (Intel):**
+```bash
+curl -fsSL https://github.com/hdresearch/ziggit/releases/latest/download/ziggit-macos-x86_64 -o ziggit
+chmod +x ziggit
+sudo mv ziggit /usr/local/bin/
+```
+
+**Linux (x86_64):**
+```bash
+curl -fsSL https://github.com/hdresearch/ziggit/releases/latest/download/ziggit-linux-x86_64 -o ziggit
+chmod +x ziggit
+sudo mv ziggit /usr/local/bin/
+```
+
+**Linux (arm64):**
+```bash
+curl -fsSL https://github.com/hdresearch/ziggit/releases/latest/download/ziggit-linux-aarch64 -o ziggit
+chmod +x ziggit
+sudo mv ziggit /usr/local/bin/
+```
+
+### Build from source
 
 Requires [Zig 0.15.2+](https://ziglang.org/download/).
 
 ```bash
 git clone https://github.com/hdresearch/ziggit.git
 cd ziggit
-zig build
-```
-
-The binary is at `zig-out/bin/ziggit`. Copy it somewhere on your `PATH`:
-
-```bash
-cp zig-out/bin/ziggit ~/.local/bin/
-```
-
-For a faster binary (recommended for daily use):
-
-```bash
 zig build -Doptimize=ReleaseFast
+cp zig-out/bin/ziggit ~/.local/bin/
 ```
 
 ### Alias as `git`
