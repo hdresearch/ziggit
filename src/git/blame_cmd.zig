@@ -1086,96 +1086,141 @@ fn trav(a: std.mem.Allocator, gp: []const u8, sh: []const u8, fp2: []const u8, t
 }
 
 fn oCBuf(buf: *std.array_list.Managed(u8), e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, srt2: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
-    const effective_abl = @min(abl2 + 1, 40);
     var w = buf.writer();
-    if (bb2 and e.is_boundary) {
-        try w.writeByteNTimes(' ', effective_abl);
-    } else {
-        try w.writeAll(e.commit_hash[0..effective_abl]);
-    }
-    if (suppress2) {
-        try w.writeByte('\t');
-        try writePadN(w, ln, lnw2);
-        try w.writeByte(')');
+    if (succinct_mod.isEnabled()) {
+        // Succinct mode: just "HASH LINE" format
+        const effective_abl = @min(7, 40); // Always use 7 chars in succinct
+        if (bb2 and e.is_boundary) {
+            try w.writeByteNTimes(' ', effective_abl);
+        } else {
+            try w.writeAll(e.commit_hash[0..effective_abl]);
+        }
+        try w.writeByte(' ');
         try w.writeAll(line);
         try w.writeByte('\n');
     } else {
-        try w.writeAll("\t(");
-        const dn_len = if (se2) e.author_email.len + 2 else e.author_name.len;
-        const pad_w = @max(mal2, dn_len + 1);
-        if (pad_w > dn_len) try w.writeByteNTimes(' ', pad_w - dn_len);
-        if (se2) { try w.writeByte('<'); try w.writeAll(e.author_email); try w.writeByte('>'); } else try w.writeAll(e.author_name);
-        try w.writeByte('\t');
-        if (srt2) { try w.print("{d} {s}", .{ e.author_time, e.author_tz }); } else try writeFmtTs(w, e.author_time, e.author_tz);
-        try w.writeByte('\t');
-        try writePadN(w, ln, lnw2);
-        try w.writeByte(')');
-        try w.writeAll(line);
-        try w.writeByte('\n');
+        // Normal annotate mode
+        const effective_abl = @min(abl2 + 1, 40);
+        if (bb2 and e.is_boundary) {
+            try w.writeByteNTimes(' ', effective_abl);
+        } else {
+            try w.writeAll(e.commit_hash[0..effective_abl]);
+        }
+        if (suppress2) {
+            try w.writeByte('\t');
+            try writePadN(w, ln, lnw2);
+            try w.writeByte(')');
+            try w.writeAll(line);
+            try w.writeByte('\n');
+        } else {
+            try w.writeAll("\t(");
+            const dn_len = if (se2) e.author_email.len + 2 else e.author_name.len;
+            const pad_w = @max(mal2, dn_len + 1);
+            if (pad_w > dn_len) try w.writeByteNTimes(' ', pad_w - dn_len);
+            if (se2) { try w.writeByte('<'); try w.writeAll(e.author_email); try w.writeByte('>'); } else try w.writeAll(e.author_name);
+            try w.writeByte('\t');
+            if (srt2) { try w.print("{d} {s}", .{ e.author_time, e.author_tz }); } else try writeFmtTs(w, e.author_time, e.author_tz);
+            try w.writeByte('\t');
+            try writePadN(w, ln, lnw2);
+            try w.writeByte(')');
+            try w.writeAll(line);
+            try w.writeByte('\n');
+        }
     }
 }
 
 fn oDBuf(buf: *std.array_list.Managed(u8), e: B.BlameEntry, line: []const u8, ln: usize, se2: bool, _: bool, mal2: usize, lnw2: usize, abl2: usize, suppress2: bool, bb2: bool) !void {
-    const field_width: usize = if (abl2 > 40) 40 else @min(abl2 + 1, 40);
-    const boundary_total: usize = if (abl2 > 40) 41 else field_width;
     var w = buf.writer();
-    if (bb2 and e.is_boundary) {
-        try w.writeByteNTimes(' ', field_width);
-    } else if (e.is_boundary) {
-        try w.writeByte('^');
-        try w.writeAll(e.commit_hash[0 .. boundary_total - 1]);
-    } else {
-        try w.writeAll(e.commit_hash[0..field_width]);
-    }
-    if (suppress2) {
+    if (succinct_mod.isEnabled()) {
+        // Succinct mode: just "HASH LINE" format
+        const field_width: usize = 7; // Always use 7 chars in succinct
+        if (bb2 and e.is_boundary) {
+            try w.writeByteNTimes(' ', field_width);
+        } else if (e.is_boundary) {
+            try w.writeByte('^');
+            try w.writeAll(e.commit_hash[0 .. field_width - 1]);
+        } else {
+            try w.writeAll(e.commit_hash[0..field_width]);
+        }
         try w.writeByte(' ');
-        try writePadN(w, ln, lnw2);
-        try w.writeAll(") ");
         try w.writeAll(line);
         try w.writeByte('\n');
     } else {
-        try w.writeAll(" (");
-        const dn_len = if (se2) e.author_email.len + 2 else e.author_name.len;
-        if (mal2 > dn_len) try w.writeByteNTimes(' ', mal2 - dn_len);
-        if (se2) { try w.writeByte('<'); try w.writeAll(e.author_email); try w.writeByte('>'); } else try w.writeAll(e.author_name);
-        try w.writeByte(' ');
-        try writeFmtTs(w, e.author_time, e.author_tz);
-        try w.writeByte(' ');
-        try writePadN(w, ln, lnw2);
-        try w.writeAll(") ");
-        try w.writeAll(line);
-        try w.writeByte('\n');
+        // Normal blame mode
+        const field_width: usize = if (abl2 > 40) 40 else @min(abl2 + 1, 40);
+        const boundary_total: usize = if (abl2 > 40) 41 else field_width;
+        if (bb2 and e.is_boundary) {
+            try w.writeByteNTimes(' ', field_width);
+        } else if (e.is_boundary) {
+            try w.writeByte('^');
+            try w.writeAll(e.commit_hash[0 .. boundary_total - 1]);
+        } else {
+            try w.writeAll(e.commit_hash[0..field_width]);
+        }
+        if (suppress2) {
+            try w.writeByte(' ');
+            try writePadN(w, ln, lnw2);
+            try w.writeAll(") ");
+            try w.writeAll(line);
+            try w.writeByte('\n');
+        } else {
+            try w.writeAll(" (");
+            const dn_len = if (se2) e.author_email.len + 2 else e.author_name.len;
+            if (mal2 > dn_len) try w.writeByteNTimes(' ', mal2 - dn_len);
+            if (se2) { try w.writeByte('<'); try w.writeAll(e.author_email); try w.writeByte('>'); } else try w.writeAll(e.author_name);
+            try w.writeByte(' ');
+            try writeFmtTs(w, e.author_time, e.author_tz);
+            try w.writeByte(' ');
+            try writePadN(w, ln, lnw2);
+            try w.writeAll(") ");
+            try w.writeAll(line);
+            try w.writeByte('\n');
+        }
     }
 }
 
 fn oPBuf(buf: *std.array_list.Managed(u8), e: B.BlameEntry, line: []const u8, ln: usize, sh2: bool, fp2: []const u8, is_group_start2: bool, group_size2: usize) !void {
     const orig_ln = if (e.orig_line > 0) e.orig_line else ln;
     var w = buf.writer();
-    if (sh2) {
+    if (succinct_mod.isEnabled()) {
+        // Succinct porcelain: minimal metadata
         if (is_group_start2) {
-            try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
+            try w.print("{s} {d} {d} {d}\n", .{ e.commit_hash[0..7], orig_ln, ln, group_size2 });
+            try w.print("author {s}\nsummary {s}\n", .{ e.author_name, e.summary });
         } else {
-            try w.print("{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
+            try w.print("{s} {d} {d}\n", .{ e.commit_hash[0..7], orig_ln, ln });
         }
-        try w.print("author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
-            e.author_name, e.author_email, e.author_time, e.author_tz,
-            e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary,
-        });
-        if (e.has_previous) {
-            try w.print("previous {s} {s}\n", .{ &e.previous_hash, fp2 });
-        }
-        if (e.is_boundary) try buf.appendSlice("boundary\n");
-        try w.print("filename {s}\n", .{fp2});
+        try w.writeByte('\t');
+        try w.writeAll(line);
+        try w.writeByte('\n');
     } else {
-        if (is_group_start2) {
-            try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
+        // Normal porcelain mode
+        if (sh2) {
+            if (is_group_start2) {
+                try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
+            } else {
+                try w.print("{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
+            }
+            try w.print("author {s}\nauthor-mail <{s}>\nauthor-time {d}\nauthor-tz {s}\ncommitter {s}\ncommitter-mail <{s}>\ncommitter-time {d}\ncommitter-tz {s}\nsummary {s}\n", .{
+                e.author_name, e.author_email, e.author_time, e.author_tz,
+                e.committer_name, e.committer_email, e.committer_time, e.committer_tz, e.summary,
+            });
+            if (e.has_previous) {
+                try w.print("previous {s} {s}\n", .{ &e.previous_hash, fp2 });
+            }
+            if (e.is_boundary) try buf.appendSlice("boundary\n");
+            try w.print("filename {s}\n", .{fp2});
         } else {
-            try w.print("{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
+            if (is_group_start2) {
+                try w.print("{s} {d} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln, group_size2 });
+            } else {
+                try w.print("{s} {d} {d}\n", .{ &e.commit_hash, orig_ln, ln });
+            }
         }
+        try w.writeByte('\t');
+        try w.writeAll(line);
+        try w.writeByte('\n');
     }
-    try w.writeByte('\t');
-    try w.writeAll(line);
-    try w.writeByte('\n');
 }
 
 fn writePadN(w: anytype, num: usize, width: usize) !void {
