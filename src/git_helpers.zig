@@ -9120,14 +9120,36 @@ pub fn isLeapYear(year: i32) bool {
 }
 
 
+/// Read a git config value by auto-discovering the git directory.
+/// Checks -c overrides, then local .git/config, then global ~/.gitconfig.
+fn getConfigValue(key: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
+    // Check -c overrides first
+    if (getConfigOverride(key)) |override_val| {
+        return allocator.dupe(u8, override_val) catch null;
+    }
+    const git_path = findGitDir() catch ".git";
+    return getConfigValueByKey(git_path, key, allocator);
+}
+
 pub fn getAuthorString(allocator: std.mem.Allocator) ![]u8 {
     const name = std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_NAME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => try allocator.dupe(u8, "Test User"),
+        error.EnvironmentVariableNotFound => blk: {
+            // Fall back to git config user.name
+            if (getConfigValue("user.name", allocator)) |cfg_name| {
+                break :blk cfg_name;
+            }
+            break :blk try allocator.dupe(u8, "Unknown");
+        },
         else => return err,
     };
     defer allocator.free(name);
     const email = std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_EMAIL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => try allocator.dupe(u8, "test@example.com"),
+        error.EnvironmentVariableNotFound => blk: {
+            if (getConfigValue("user.email", allocator)) |cfg_email| {
+                break :blk cfg_email;
+            }
+            break :blk try allocator.dupe(u8, "unknown@unknown");
+        },
         else => return err,
     };
     defer allocator.free(email);
@@ -9148,12 +9170,28 @@ pub fn getAuthorString(allocator: std.mem.Allocator) ![]u8 {
 
 pub fn getCommitterString(allocator: std.mem.Allocator) ![]u8 {
     const name = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_NAME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_NAME") catch try allocator.dupe(u8, "Test User"),
+        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_NAME") catch |err2| switch (err2) {
+            error.EnvironmentVariableNotFound => blk: {
+                if (getConfigValue("user.name", allocator)) |cfg_name| {
+                    break :blk cfg_name;
+                }
+                break :blk try allocator.dupe(u8, "Unknown");
+            },
+            else => return err2,
+        },
         else => return err,
     };
     defer allocator.free(name);
     const email = std.process.getEnvVarOwned(allocator, "GIT_COMMITTER_EMAIL") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_EMAIL") catch try allocator.dupe(u8, "test@example.com"),
+        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "GIT_AUTHOR_EMAIL") catch |err2| switch (err2) {
+            error.EnvironmentVariableNotFound => blk: {
+                if (getConfigValue("user.email", allocator)) |cfg_email| {
+                    break :blk cfg_email;
+                }
+                break :blk try allocator.dupe(u8, "unknown@unknown");
+            },
+            else => return err2,
+        },
         else => return err,
     };
     defer allocator.free(email);
