@@ -1,4 +1,5 @@
 const std = @import("std");
+const objects = @import("objects.zig");
 
 // ============================================================================
 // Types
@@ -1862,4 +1863,236 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
         .pack_data = pack_data,
         .allocator = allocator,
     };
+}
+
+// ============================================================================
+// Push (git-receive-pack) support
+// ============================================================================
+
+/// Discover refs from a remote using git-receive-pack service.
+pub fn discoverRefsReceivePack(allocator: std.mem.Allocator, url: []const u8) !RefDiscovery {
+    var base = url;
+    while (base.len > 0 and base[base.len - 1] == '/') base = base[0 .. base.len - 1];
+
+    const ref_url = try std.fmt.allocPrint(allocator, "{s}/info/refs?service=git-receive-pack", .{base});
+    defer allocator.free(ref_url);
+
+    const body = try httpGetWithClient(allocator, null, ref_url);
+    defer allocator.free(body);
+
+    return parseRefDiscoveryResponse(allocator, body);
+}
+
+/// Push objects to a remote via smart HTTP git-receive-pack.
+/// ref_updates: slice of .{ old_hash, new_hash, ref_name } tuples.
+/// pack_data: the pack file bytes to send (including PACK header + checksum).
+/// Returns the response body for status parsing.
+pub fn sendReceivePack(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    old_hash: []const u8,
+    new_hash: []const u8,
+    ref_name: []const u8,
+    pack_data: []const u8,
+) ![]u8 {
+    var base = url;
+    while (base.len > 0 and base[base.len - 1] == '/') base = base[0 .. base.len - 1];
+
+    // Build pkt-line request body
+    var body = std.array_list.Managed(u8).init(allocator);
+    defer body.deinit();
+
+    // ref update line: "<old> <new> <refname>\0 report-status side-band-64k\n"
+    const ref_line = try std.fmt.allocPrint(allocator, "{s} {s} {s}\x00 report-status\n", .{ old_hash, new_hash, ref_name });
+    defer allocator.free(ref_line);
+
+    const pkt = try writePktLine(allocator, ref_line);
+    defer allocator.free(pkt);
+    try body.appendSlice(pkt);
+
+    // flush
+    try body.appendSlice(writeFlushPkt());
+
+    // pack data
+    try body.appendSlice(pack_data);
+
+    const post_url = try std.fmt.allocPrint(allocator, "{s}/git-receive-pack", .{base});
+    defer allocator.free(post_url);
+
+    return httpPostWithClient(allocator, null, post_url, body.items, "application/x-git-receive-pack-request");
+}
+
+/// Generate a minimal pack file containing all objects reachable from `new_hash`
+/// that are not reachable from `old_hash` (or all if old_hash is zero).
+/// Returns owned pack bytes (PACK header + objects + SHA1 checksum).
+pub fn generatePackForPush(
+    allocator: std.mem.Allocator,
+    git_dir: []const u8,
+    new_hash: []const u8,
+    old_hash: ?[]const u8,
+    platform_impl: anytype,
+) ![]u8 {
+    const zero_hash = "0000000000000000000000000000000000000000";
+
+    // Collect objects reachable from new_hash
+    var new_set = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = new_set.keyIterator();
+        while (it.next()) |k| allocator.free(@constCast(k.*));
+        new_set.deinit();
+    }
+    var new_list = std.array_list.Managed([]const u8).init(allocator);
+    defer new_list.deinit();
+
+    try walkReachableForPush(allocator, git_dir, new_hash, &new_set, &new_list, platform_impl);
+
+    // If old_hash exists and isn't zero, collect its reachable set and subtract
+    if (old_hash) |oh| {
+        if (!std.mem.eql(u8, oh, zero_hash) and oh.len >= 40) {
+            var old_set = std.StringHashMap(void).init(allocator);
+            defer {
+                var it2 = old_set.keyIterator();
+                while (it2.next()) |k| allocator.free(@constCast(k.*));
+                old_set.deinit();
+            }
+            var old_list = std.array_list.Managed([]const u8).init(allocator);
+            defer {
+                old_list.deinit();
+            }
+            walkReachableForPush(allocator, git_dir, oh, &old_set, &old_list, platform_impl) catch {};
+
+            // Remove objects that remote already has
+            var i: usize = 0;
+            while (i < new_list.items.len) {
+                if (old_set.contains(new_list.items[i])) {
+                    _ = new_list.swapRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    // Build pack
+    var pack = std.array_list.Managed(u8).init(allocator);
+    errdefer pack.deinit();
+
+    try pack.appendSlice("PACK");
+    const version: u32 = 2;
+    try pack.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, version)));
+    const count_pos = pack.items.len;
+    try pack.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u32, 0))); // placeholder
+
+    var actual_count: u32 = 0;
+    for (new_list.items) |hash| {
+        const obj = objects.GitObject.load(hash, git_dir, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+
+        const type_num: u8 = switch (obj.type) {
+            .commit => 1,
+            .tree => 2,
+            .blob => 3,
+            .tag => 4,
+        };
+
+        // Variable-length object header
+        var obj_size = obj.data.len;
+        var first_byte: u8 = (type_num << 4) | @as(u8, @intCast(obj_size & 0x0F));
+        obj_size >>= 4;
+        if (obj_size > 0) first_byte |= 0x80;
+        try pack.append(first_byte);
+        while (obj_size > 0) {
+            var byte: u8 = @intCast(obj_size & 0x7F);
+            obj_size >>= 7;
+            if (obj_size > 0) byte |= 0x80;
+            try pack.append(byte);
+        }
+
+        const compressed = objects.cCompressSlice(allocator, obj.data) catch continue;
+        defer allocator.free(compressed);
+        try pack.appendSlice(compressed);
+        actual_count += 1;
+    }
+
+    // Patch object count
+    const count_bytes = std.mem.toBytes(std.mem.nativeToBig(u32, actual_count));
+    @memcpy(pack.items[count_pos..][0..4], &count_bytes);
+
+    // SHA1 checksum
+    var sha1 = std.crypto.hash.Sha1.init(.{});
+    sha1.update(pack.items);
+    const checksum = sha1.finalResult();
+    try pack.appendSlice(&checksum);
+
+    return pack.toOwnedSlice();
+}
+
+fn walkReachableForPush(
+    allocator: std.mem.Allocator,
+    git_dir: []const u8,
+    start_hash: []const u8,
+    set: *std.StringHashMap(void),
+    list: *std.array_list.Managed([]const u8),
+    platform_impl: anytype,
+) !void {
+    var worklist = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (worklist.items) |item| allocator.free(item);
+        worklist.deinit();
+    }
+    try worklist.append(try allocator.dupe(u8, start_hash));
+
+    while (worklist.items.len > 0) {
+        const hash = worklist.pop() orelse break;
+        defer allocator.free(hash);
+
+        if (set.contains(hash)) continue;
+
+        const obj = objects.GitObject.load(hash, git_dir, platform_impl, allocator) catch continue;
+        defer obj.deinit(allocator);
+
+        const duped = try allocator.dupe(u8, hash);
+        try set.put(duped, {});
+        try list.append(duped);
+
+        switch (obj.type) {
+            .commit => {
+                var lines = std.mem.splitScalar(u8, obj.data, '\n');
+                while (lines.next()) |line| {
+                    if (line.len == 0) break;
+                    if (std.mem.startsWith(u8, line, "tree ") and line.len >= 45) {
+                        try worklist.append(try allocator.dupe(u8, line[5..45]));
+                    } else if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                        try worklist.append(try allocator.dupe(u8, line[7..47]));
+                    }
+                }
+            },
+            .tree => {
+                var tpos: usize = 0;
+                while (tpos < obj.data.len) {
+                    const null_pos = std.mem.indexOfScalarPos(u8, obj.data, tpos, 0) orelse break;
+                    if (null_pos + 21 > obj.data.len) break;
+                    const entry_hash_bytes = obj.data[null_pos + 1 .. null_pos + 21];
+                    var entry_hex: [40]u8 = undefined;
+                    for (entry_hash_bytes, 0..) |b, j| {
+                        const hc = "0123456789abcdef";
+                        entry_hex[j * 2] = hc[b >> 4];
+                        entry_hex[j * 2 + 1] = hc[b & 0xf];
+                    }
+                    try worklist.append(try allocator.dupe(u8, &entry_hex));
+                    tpos = null_pos + 21;
+                }
+            },
+            .tag => {
+                var lines = std.mem.splitScalar(u8, obj.data, '\n');
+                while (lines.next()) |line| {
+                    if (line.len == 0) break;
+                    if (std.mem.startsWith(u8, line, "object ") and line.len >= 47) {
+                        try worklist.append(try allocator.dupe(u8, line[7..47]));
+                    }
+                }
+            },
+            .blob => {},
+        }
+    }
 }

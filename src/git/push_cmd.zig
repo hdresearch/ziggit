@@ -6,6 +6,7 @@ const refs = @import("refs.zig");
 const objects = @import("objects.zig");
 const fetch_cmd = @import("fetch_cmd.zig");
 const hooks = @import("../git/hooks.zig");
+const smart_http = @import("smart_http.zig");
 
 fn readFileContent(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
@@ -398,11 +399,14 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     else
         remote_url;
 
-    // Check for network protocols - not supported
-    if (std.mem.startsWith(u8, actual_url, "http://") or std.mem.startsWith(u8, actual_url, "https://") or
-        std.mem.startsWith(u8, actual_url, "ssh://") or std.mem.startsWith(u8, actual_url, "git://"))
-    {
-        try platform_impl.writeStderr("fatal: remote transport not supported\n");
+    // Network push via smart HTTP
+    if (std.mem.startsWith(u8, actual_url, "http://") or std.mem.startsWith(u8, actual_url, "https://")) {
+        try pushSmartHttp(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, actual_url, "ssh://") or std.mem.startsWith(u8, actual_url, "git://")) {
+        try platform_impl.writeStderr("fatal: ssh:// and git:// push not yet supported, use https://\n");
         std.process.exit(128);
     }
 
@@ -1381,4 +1385,216 @@ fn setUpstreamConfig(allocator: std.mem.Allocator, config_path: []const u8, bran
     }
 
     std.fs.cwd().writeFile(.{ .sub_path = config_path, .data = new_content.items }) catch {};
+}
+
+// ============================================================================
+// Smart HTTP push
+// ============================================================================
+
+fn pushSmartHttp(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    url: []const u8,
+    remote: []const u8,
+    refspecs_list: *std.array_list.Managed([]const u8),
+    force: bool,
+    dry_run: bool,
+    quiet: bool,
+    push_all: bool,
+    push_tags: bool,
+    push_mirror: bool,
+    push_delete: bool,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    _ = push_mirror;
+    _ = push_all;
+    _ = push_tags;
+    _ = push_delete;
+
+    // Discover remote refs
+    var discovery = smart_http.discoverRefsReceivePack(allocator, url) catch {
+        try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+        std.process.exit(128);
+    };
+    defer discovery.deinit();
+
+    // Build effective refspecs
+    var effective_refspecs = std.array_list.Managed([]const u8).init(allocator);
+    defer effective_refspecs.deinit();
+
+    if (refspecs_list.items.len > 0) {
+        for (refspecs_list.items) |rs| try effective_refspecs.append(rs);
+    } else {
+        // Default: push current branch
+        if (refs.getCurrentBranch(git_path, platform_impl, allocator)) |branch| {
+            const rs = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ branch, branch });
+            allocator.free(branch);
+            try effective_refspecs.append(rs);
+        } else |_| {
+            try platform_impl.writeStderr("fatal: no branch to push\n");
+            std.process.exit(128);
+        }
+    }
+
+    const zero_hash = "0000000000000000000000000000000000000000";
+
+    for (effective_refspecs.items) |rs_raw| {
+        var rs = rs_raw;
+        var force_this = force;
+        if (rs.len > 0 and rs[0] == '+') {
+            rs = rs[1..];
+            force_this = true;
+        }
+
+        var local_ref: []const u8 = rs;
+        var remote_ref: []const u8 = rs;
+        if (std.mem.indexOf(u8, rs, ":")) |colon| {
+            local_ref = rs[0..colon];
+            remote_ref = rs[colon + 1 ..];
+        }
+
+        // Qualify refs
+        if (!std.mem.startsWith(u8, remote_ref, "refs/")) {
+            const qr = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{remote_ref});
+            remote_ref = qr;
+        }
+
+        // Resolve local ref to hash
+        const local_hash_opt = refs.resolveRef(git_path, local_ref, platform_impl, allocator) catch null;
+        const local_hash = local_hash_opt orelse {
+            const msg = try std.fmt.allocPrint(allocator, "error: src refspec {s} does not match any\n", .{local_ref});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            continue;
+        };
+        defer allocator.free(local_hash);
+
+        // Find old hash from remote discovery
+        var old_hash: []const u8 = zero_hash;
+        for (discovery.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, remote_ref)) {
+                old_hash = &ref.hash;
+                break;
+            }
+        }
+
+        // Check if already up-to-date
+        if (std.mem.eql(u8, local_hash, old_hash)) {
+            if (!quiet) {
+                const msg = try std.fmt.allocPrint(allocator, "Everything up-to-date\n", .{});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
+            continue;
+        }
+
+        // Fast-forward check (skip if force)
+        if (!force_this and !std.mem.eql(u8, old_hash, zero_hash)) {
+            // TODO: proper ancestor check; for now allow all pushes
+        }
+
+        if (dry_run) {
+            const branch_name = if (std.mem.startsWith(u8, remote_ref, "refs/heads/"))
+                remote_ref["refs/heads/".len..]
+            else
+                remote_ref;
+            const msg = try std.fmt.allocPrint(allocator, "To {s}\n   {s}..{s}  {s} -> {s} (dry run)\n", .{
+                url, old_hash[0..7], local_hash[0..7], local_ref, branch_name,
+            });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+            continue;
+        }
+
+        // Generate pack with objects remote needs
+        const pack_data = smart_http.generatePackForPush(allocator, git_path, local_hash, old_hash, platform_impl) catch {
+            try platform_impl.writeStderr("error: failed to generate pack data\n");
+            std.process.exit(1);
+        };
+        defer allocator.free(pack_data);
+
+        // Send to remote
+        const response = smart_http.sendReceivePack(allocator, url, old_hash, local_hash, remote_ref, pack_data) catch {
+            try platform_impl.writeStderr("error: failed to push to remote\n");
+            std.process.exit(1);
+        };
+        defer allocator.free(response);
+
+        // Check for errors in response
+        if (std.mem.indexOf(u8, response, "unpack ok") == null and
+            std.mem.indexOf(u8, response, "000eunpack ok") == null)
+        {
+            // Try to extract error message
+            if (std.mem.indexOf(u8, response, "ng ")) |ng_pos| {
+                const err_start = ng_pos + 3;
+                const err_end = std.mem.indexOfScalarPos(u8, response, err_start, '\n') orelse response.len;
+                const msg = try std.fmt.allocPrint(allocator, "error: remote rejected: {s}\n", .{response[err_start..err_end]});
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+                std.process.exit(1);
+            }
+            // Raw response might be pkt-line encoded - check for unpack ok in pkt-line
+            var found_ok = false;
+            var offset: usize = 0;
+            while (offset < response.len) {
+                const result = smart_http.parsePktLine(response[offset..]) catch break;
+                offset += result.consumed;
+                if (result.pkt.line_type == .data) {
+                    if (std.mem.startsWith(u8, result.pkt.data, "unpack ok")) {
+                        found_ok = true;
+                        break;
+                    }
+                    if (std.mem.startsWith(u8, result.pkt.data, "ng ")) {
+                        const msg = try std.fmt.allocPrint(allocator, "error: remote rejected: {s}\n", .{result.pkt.data[3..]});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                        std.process.exit(1);
+                    }
+                }
+            }
+            if (!found_ok) {
+                try platform_impl.writeStderr("error: push failed (no unpack confirmation)\n");
+                std.process.exit(1);
+            }
+        }
+
+        // Update local tracking ref
+        {
+            const config_path = try std.fmt.allocPrint(allocator, "{s}/config", .{git_path});
+            defer allocator.free(config_path);
+            if (readFileContent(allocator, config_path)) |config_content| {
+                defer allocator.free(config_content);
+                if (std.mem.startsWith(u8, remote_ref, "refs/heads/")) {
+                    const pushed_branch = remote_ref["refs/heads/".len..];
+                    const tracking_ref = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}/{s}", .{ git_path, remote, pushed_branch });
+                    defer allocator.free(tracking_ref);
+                    if (std.mem.lastIndexOfScalar(u8, tracking_ref, '/')) |ls| {
+                        std.fs.cwd().makePath(tracking_ref[0..ls]) catch {};
+                    }
+                    const data = try std.fmt.allocPrint(allocator, "{s}\n", .{local_hash});
+                    defer allocator.free(data);
+                    std.fs.cwd().writeFile(.{ .sub_path = tracking_ref, .data = data }) catch {};
+                }
+            } else |_| {}
+        }
+
+        // Print success
+        if (!quiet) {
+            const branch_name = if (std.mem.startsWith(u8, remote_ref, "refs/heads/"))
+                remote_ref["refs/heads/".len..]
+            else
+                remote_ref;
+            if (succinct_mod.isEnabled()) {
+                const msg = try std.fmt.allocPrint(allocator, "ok push {s} {s}\n", .{ branch_name, local_hash[0..7] });
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "To {s}\n   {s}..{s}  {s} -> {s}\n", .{
+                    url, old_hash[0..7], local_hash[0..7], local_ref, branch_name,
+                });
+                defer allocator.free(msg);
+                try platform_impl.writeStderr(msg);
+            }
+        }
+    }
 }
