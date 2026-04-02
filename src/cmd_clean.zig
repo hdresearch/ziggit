@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -192,34 +193,68 @@ pub fn nativeCmdClean(_: std.mem.Allocator, args: [][]const u8, command_index: u
         fn cmp(_: void, a: []u8, b: []u8) bool { return std.mem.lessThan(u8, a, b); }
     }.cmp);
     
-    for (to_remove.items) |path| {
-        if (dry_run) {
-            if (!quiet and !succinct_mod.isEnabled()) {
-                const m = std.fmt.allocPrint(allocator, "Would remove {s}\n", .{path}) catch continue;
+    if (succinct_mod.isEnabled()) {
+        // Succinct mode: show summary only
+        if (to_remove.items.len > 0 and !quiet) {
+            if (dry_run) {
+                const m = std.fmt.allocPrint(allocator, "would clean {d} files\n", .{to_remove.items.len}) catch return;
+                defer allocator.free(m);
+                platform_impl.writeStdout(m) catch {};
+            } else {
+                // Actually remove files first
+                for (to_remove.items) |path| {
+                    dir.deleteFile(path) catch {};
+                    if (std.fs.path.dirname(path)) |parent| {
+                        var p = parent;
+                        while (p.len > 0) {
+                            dir.deleteDir(p) catch break;
+                            p = std.fs.path.dirname(p) orelse break;
+                        }
+                    }
+                }
+                const m = std.fmt.allocPrint(allocator, "ok clean {d} files\n", .{to_remove.items.len}) catch return;
                 defer allocator.free(m);
                 platform_impl.writeStdout(m) catch {};
             }
         } else {
-            if (!quiet and !succinct_mod.isEnabled()) {
-                const m = std.fmt.allocPrint(allocator, "Removing {s}\n", .{path}) catch continue;
-                defer allocator.free(m);
-                platform_impl.writeStdout(m) catch {};
-            }
-            dir.deleteFile(path) catch {};
-            if (std.fs.path.dirname(path)) |parent| {
-                var p = parent;
-                while (p.len > 0) {
-                    dir.deleteDir(p) catch break;
-                    p = std.fs.path.dirname(p) orelse break;
+            // No output for quiet mode or no files, but still do the removal
+            if (!dry_run) {
+                for (to_remove.items) |path| {
+                    dir.deleteFile(path) catch {};
+                    if (std.fs.path.dirname(path)) |parent| {
+                        var p = parent;
+                        while (p.len > 0) {
+                            dir.deleteDir(p) catch break;
+                            p = std.fs.path.dirname(p) orelse break;
+                        }
+                    }
                 }
             }
         }
-    }
-    
-    // Succinct mode summary
-    if (succinct_mod.isEnabled() and !quiet and to_remove.items.len > 0) {
-        const msg = std.fmt.allocPrint(allocator, "ok clean {d} files\n", .{to_remove.items.len}) catch return;
-        defer allocator.free(msg);
-        platform_impl.writeStdout(msg) catch {};
+    } else {
+        // Normal mode: list each file
+        for (to_remove.items) |path| {
+            if (dry_run) {
+                if (!quiet) {
+                    const m = std.fmt.allocPrint(allocator, "Would remove {s}\n", .{path}) catch continue;
+                    defer allocator.free(m);
+                    platform_impl.writeStdout(m) catch {};
+                }
+            } else {
+                if (!quiet) {
+                    const m = std.fmt.allocPrint(allocator, "Removing {s}\n", .{path}) catch continue;
+                    defer allocator.free(m);
+                    platform_impl.writeStdout(m) catch {};
+                }
+                dir.deleteFile(path) catch {};
+                if (std.fs.path.dirname(path)) |parent| {
+                    var p = parent;
+                    while (p.len > 0) {
+                        dir.deleteDir(p) catch break;
+                        p = std.fs.path.dirname(p) orelse break;
+                    }
+                }
+            }
+        }
     }
 }
