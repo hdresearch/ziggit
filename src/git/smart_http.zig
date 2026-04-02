@@ -290,10 +290,15 @@ fn httpGetWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.ht
         headers_buf[n_headers] = .{ .name = "Git-Protocol", .value = "version=2" };
         n_headers += 1;
     }
-    var bearer_buf: [512]u8 = undefined;
+    var bearer_buf: [1024]u8 = undefined;
     if (auth.token) |token| {
-        const bearer = std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{token}) catch return error.Overflow;
-        headers_buf[n_headers] = .{ .name = "Authorization", .value = bearer };
+        // Use Basic auth: base64("x-access-token:" ++ token)
+        var raw_buf: [600]u8 = undefined;
+        const raw = std.fmt.bufPrint(&raw_buf, "x-access-token:{s}", .{token}) catch return error.Overflow;
+        var encoded_buf: [800]u8 = undefined;
+        const encoded_len = std.base64.standard.Encoder.encode(&encoded_buf, raw).len;
+        const basic = std.fmt.bufPrint(&bearer_buf, "Basic {s}", .{encoded_buf[0..encoded_len]}) catch return error.Overflow;
+        headers_buf[n_headers] = .{ .name = "Authorization", .value = basic };
         n_headers += 1;
     }
 
@@ -349,10 +354,14 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
         headers_buf[n_headers] = .{ .name = "Git-Protocol", .value = "version=2" };
         n_headers += 1;
     }
-    var bearer_buf: [512]u8 = undefined;
+    var bearer_buf: [1024]u8 = undefined;
     if (auth.token) |token| {
-        const bearer = std.fmt.bufPrint(&bearer_buf, "Bearer {s}", .{token}) catch return error.Overflow;
-        headers_buf[n_headers] = .{ .name = "Authorization", .value = bearer };
+        var raw_buf: [600]u8 = undefined;
+        const raw = std.fmt.bufPrint(&raw_buf, "x-access-token:{s}", .{token}) catch return error.Overflow;
+        var encoded_buf: [800]u8 = undefined;
+        const encoded_len = std.base64.standard.Encoder.encode(&encoded_buf, raw).len;
+        const basic = std.fmt.bufPrint(&bearer_buf, "Basic {s}", .{encoded_buf[0..encoded_len]}) catch return error.Overflow;
+        headers_buf[n_headers] = .{ .name = "Authorization", .value = basic };
         n_headers += 1;
     }
 
