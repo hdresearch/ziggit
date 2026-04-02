@@ -4,6 +4,7 @@ const pm = @import("../platform/platform.zig");
 const refs = @import("refs.zig");
 const B = @import("blame.zig");
 const mc = @import("../main_common.zig");
+const succinct_mod = @import("../succinct.zig");
 
 pub fn cmdBlame(a: std.mem.Allocator, args: *pm.ArgIterator, pi: *const pm.Platform, is_annotate: bool) !void {
     var col = is_annotate;
