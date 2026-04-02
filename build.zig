@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.linkLibC();
 
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{});
 
     // Expose ziggit as a library module for downstream consumers (e.g., bun fork)
     _ = b.addModule("ziggit", .{
@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
 
     // Create git -> ziggit symlink so test suite can find 'git' command
     const symlink = b.addSystemCommand(&.{ "ln", "-sf", "ziggit", b.getInstallPath(.bin, "git") });
+    symlink.step.dependOn(&install_exe.step);
     b.getInstallStep().dependOn(&symlink.step);
 
     // WASM build target (wasm32-freestanding)
