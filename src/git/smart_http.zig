@@ -1940,8 +1940,30 @@ pub fn generatePackForPush(
     new_hash: []const u8,
     old_hash: ?[]const u8,
     platform_impl: anytype,
+    remote_refs: []const Ref,
 ) ![]u8 {
     const zero_hash = "0000000000000000000000000000000000000000";
+
+    // Collect all objects the remote already has (from ALL its refs)
+    var old_set = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = old_set.keyIterator();
+        while (it.next()) |k| allocator.free(@constCast(k.*));
+        old_set.deinit();
+    }
+    var old_list = std.array_list.Managed([]const u8).init(allocator);
+    defer old_list.deinit();
+
+    // Walk from each remote ref to build the "have" set
+    for (remote_refs) |ref| {
+        walkReachableForPush(allocator, git_dir, &ref.hash, &old_set, &old_list, platform_impl) catch {};
+    }
+    // Also walk from explicit old_hash if provided
+    if (old_hash) |oh| {
+        if (!std.mem.eql(u8, oh, zero_hash) and oh.len >= 40) {
+            walkReachableForPush(allocator, git_dir, oh, &old_set, &old_list, platform_impl) catch {};
+        }
+    }
 
     // Collect objects reachable from new_hash
     var new_set = std.StringHashMap(void).init(allocator);
@@ -1955,29 +1977,14 @@ pub fn generatePackForPush(
 
     try walkReachableForPush(allocator, git_dir, new_hash, &new_set, &new_list, platform_impl);
 
-    // If old_hash exists and isn't zero, collect its reachable set and subtract
-    if (old_hash) |oh| {
-        if (!std.mem.eql(u8, oh, zero_hash) and oh.len >= 40) {
-            var old_set = std.StringHashMap(void).init(allocator);
-            defer {
-                var it2 = old_set.keyIterator();
-                while (it2.next()) |k| allocator.free(@constCast(k.*));
-                old_set.deinit();
-            }
-            var old_list = std.array_list.Managed([]const u8).init(allocator);
-            defer {
-                old_list.deinit();
-            }
-            walkReachableForPush(allocator, git_dir, oh, &old_set, &old_list, platform_impl) catch {};
-
-            // Remove objects that remote already has
-            var i: usize = 0;
-            while (i < new_list.items.len) {
-                if (old_set.contains(new_list.items[i])) {
-                    _ = new_list.swapRemove(i);
-                } else {
-                    i += 1;
-                }
+    // Remove objects the remote already has
+    {
+        var i: usize = 0;
+        while (i < new_list.items.len) {
+            if (old_set.contains(new_list.items[i])) {
+                _ = new_list.swapRemove(i);
+            } else {
+                i += 1;
             }
         }
     }

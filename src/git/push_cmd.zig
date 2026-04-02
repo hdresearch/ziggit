@@ -1453,10 +1453,18 @@ fn pushSmartHttp(
             remote_ref = rs[colon + 1 ..];
         }
 
-        // Qualify refs
+        // Qualify refs - check if it's a tag or branch
         if (!std.mem.startsWith(u8, remote_ref, "refs/")) {
-            const qr = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{remote_ref});
-            remote_ref = qr;
+            // Check if it exists as a tag locally
+            const tag_check = try std.fmt.allocPrint(allocator, "{s}/refs/tags/{s}", .{ git_path, remote_ref });
+            defer allocator.free(tag_check);
+            if (std.fs.cwd().access(tag_check, .{})) |_| {
+                const qr = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{remote_ref});
+                remote_ref = qr;
+            } else |_| {
+                const qr = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{remote_ref});
+                remote_ref = qr;
+            }
         }
 
         // Resolve local ref to hash
@@ -1507,7 +1515,8 @@ fn pushSmartHttp(
         }
 
         // Generate pack with objects remote needs
-        const pack_data = smart_http.generatePackForPush(allocator, git_path, local_hash, old_hash, platform_impl) catch {
+        // Use ALL remote refs as "have" set so we don't resend objects the remote already has
+        const pack_data = smart_http.generatePackForPush(allocator, git_path, local_hash, old_hash, platform_impl, discovery.refs) catch {
             try platform_impl.writeStderr("error: failed to generate pack data\n");
             std.process.exit(1);
         };
