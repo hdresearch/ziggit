@@ -250,11 +250,11 @@ pub fn nativeCmdReflog(allocator: std.mem.Allocator, args: [][]const u8, command
                                     if (diff < 60) {
                                         buf_writer.print("{d} seconds ago", .{diff}) catch continue;
                                     } else if (diff < 3600) {
-                                        buf_writer.print("{d} minutes ago", .{diff / 60}) catch continue;
+                                        buf_writer.print("{d} minutes ago", .{@divTrunc(diff, 60)}) catch continue;
                                     } else if (diff < 86400) {
-                                        buf_writer.print("{d} hours ago", .{diff / 3600}) catch continue;
+                                        buf_writer.print("{d} hours ago", .{@divTrunc(diff, 3600)}) catch continue;
                                     } else {
-                                        buf_writer.print("{d} days ago", .{diff / 86400}) catch continue;
+                                        buf_writer.print("{d} days ago", .{@divTrunc(diff, 86400)}) catch continue;
                                     }
                                 } else {
                                     buf_writer.writeAll("unknown time") catch continue;
