@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
@@ -154,9 +155,15 @@ pub fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]con
             try platform_impl.writeStderr(warn_msg);
         }
         if (!quiet) {
-            const msg = try std.fmt.allocPrint(allocator, "Reinitialized existing helpers.Git repository in {s}/\n", .{abs_path});
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+            if (succinct_mod.isEnabled()) {
+                const msg = try std.fmt.allocPrint(allocator, "ok init {s}\n", .{abs_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "Reinitialized existing helpers.Git repository in {s}/\n", .{abs_path});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
         }
         return;
     }
@@ -365,9 +372,15 @@ pub fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]con
     const abs_path = std.fs.cwd().realpathAlloc(allocator, git_dir) catch try allocator.dupe(u8, git_dir);
     defer allocator.free(abs_path);
     if (!quiet) {
-        const msg = try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{abs_path});
-        defer allocator.free(msg);
-        try platform_impl.writeStdout(msg);
+        if (succinct_mod.isEnabled()) {
+            const msg = try std.fmt.allocPrint(allocator, "ok init {s}\n", .{abs_path});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        } else {
+            const msg = try std.fmt.allocPrint(allocator, "Initialized empty Git repository in {s}/\n", .{abs_path});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        }
     }
 }
 
