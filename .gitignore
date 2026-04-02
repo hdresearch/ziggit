@@ -2,3 +2,4 @@
 zig-out/
 node_modules/
 libziggit.a
+.vers/
