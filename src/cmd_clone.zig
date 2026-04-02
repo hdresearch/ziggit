@@ -4,6 +4,7 @@
 const std = @import("std");
 const platform_mod = @import("platform/platform.zig");
 const helpers = @import("git_helpers.zig");
+const succinct_mod = @import("succinct.zig");
 const fetch_cmd = helpers.fetch_cmd;
 const cmd_checkout = @import("cmd_checkout.zig");
 
@@ -103,9 +104,11 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     }
                 };
 
-                const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into bare repository '{s}'...\n", .{final_target});
-                defer allocator.free(clone_msg);
-                try platform_impl.writeStderr(clone_msg);
+                if (!succinct_mod.isEnabled()) {
+                    const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into bare repository '{s}'...\n", .{final_target});
+                    defer allocator.free(clone_msg);
+                    try platform_impl.writeStderr(clone_msg);
+                }
 
                 const ziggit = @import("ziggit.zig");
                 var repo = if (clone_depth > 0)
@@ -123,6 +126,12 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                         std.process.exit(128);
                     };
                 repo.close();
+                
+                if (succinct_mod.isEnabled()) {
+                    const success_msg = try std.fmt.allocPrint(allocator, "ok clone {s} into {s}\n", .{url_val, final_target});
+                    defer allocator.free(success_msg);
+                    try platform_impl.writeStdout(success_msg);
+                }
                 return;
             }
         }
@@ -156,9 +165,11 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     }
                 };
 
-                const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target});
-                defer allocator.free(clone_msg);
-                try platform_impl.writeStderr(clone_msg);
+                if (!succinct_mod.isEnabled()) {
+                    const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target});
+                    defer allocator.free(clone_msg);
+                    try platform_impl.writeStderr(clone_msg);
+                }
 
                 // helpers.Use cloneBare to download everything into a temp bare dir, then convert to non-bare
                 const ziggit = @import("ziggit.zig");
@@ -223,7 +234,12 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 const cf = try std.fs.cwd().createFile(config_path, .{});
                 defer cf.close();
                 try cf.writeAll(new_config.items);
-
+                
+                if (succinct_mod.isEnabled()) {
+                    const success_msg = try std.fmt.allocPrint(allocator, "ok clone {s} into {s}\n", .{url_val, final_target});
+                    defer allocator.free(success_msg);
+                    try platform_impl.writeStdout(success_msg);
+                }
                 return; // --no-checkout means skip checkout
             }
         }
@@ -270,14 +286,22 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     } else break :bt "repository.git";
                 };
 
-                const bare_msg = try std.fmt.allocPrint(allocator, "Cloning into bare repository '{s}'...\n", .{bfinal_target});
-                defer allocator.free(bare_msg);
-                try platform_impl.writeStderr(bare_msg);
+                if (!succinct_mod.isEnabled()) {
+                    const bare_msg = try std.fmt.allocPrint(allocator, "Cloning into bare repository '{s}'...\n", .{bfinal_target});
+                    defer allocator.free(bare_msg);
+                    try platform_impl.writeStderr(bare_msg);
+                }
 
                 performLocalClone(allocator, burl, bfinal_target, true, false, null, null, platform_impl, false, is_mirror) catch {
                     try platform_impl.writeStderr("fatal: repository does not exist\n");
                     std.process.exit(128);
                 };
+                
+                if (succinct_mod.isEnabled()) {
+                    const success_msg = try std.fmt.allocPrint(allocator, "ok clone {s} into {s}\n", .{burl, bfinal_target});
+                    defer allocator.free(success_msg);
+                    try platform_impl.writeStdout(success_msg);
+                }
                 return;
             }
         }
@@ -398,9 +422,11 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             }
         }
 
-        const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
-        defer allocator.free(clone_msg);
-        try platform_impl.writeStderr(clone_msg);
+        if (!succinct_mod.isEnabled()) {
+            const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
+            defer allocator.free(clone_msg);
+            try platform_impl.writeStderr(clone_msg);
+        }
 
         performLocalClone(allocator, url.?, final_target_dir, false, is_no_checkout, clone_branch, clone_origin, platform_impl, is_shared, is_mirror) catch |err| {
             // helpers.Clean up on failure
@@ -410,6 +436,12 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             try platform_impl.writeStderr(emsg);
             std.process.exit(128);
         };
+        
+        if (succinct_mod.isEnabled()) {
+            const success_msg = try std.fmt.allocPrint(allocator, "ok clone {s} into {s}\n", .{url.?, final_target_dir});
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
+        }
         return;
     }
 
@@ -421,9 +453,11 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         std.process.exit(128);
     }
     
-    const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
-    defer allocator.free(clone_msg);
-    try platform_impl.writeStderr(clone_msg);
+    if (!succinct_mod.isEnabled()) {
+        const clone_msg = try std.fmt.allocPrint(allocator, "Cloning into '{s}'...\n", .{final_target_dir});
+        defer allocator.free(clone_msg);
+        try platform_impl.writeStderr(clone_msg);
+    }
     
     // helpers.For HTTPS URLs, use native smart HTTP clone + checkout
     if (std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://")) {
@@ -518,6 +552,12 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     std.debug.print("[timing] checkout: {}ms\n", .{ct.read() / std.time.ns_per_ms});
                 }
             }
+        }
+        
+        if (succinct_mod.isEnabled()) {
+            const success_msg = try std.fmt.allocPrint(allocator, "ok clone {s} into {s}\n", .{url.?, final_target_dir});
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
         }
 
         return;
@@ -922,6 +962,13 @@ pub fn performLocalClone(
                 defer allocator.free(emsg);
                 try platform_impl.writeStderr(emsg);
             };
+        }
+        
+        // Success message for succinct mode
+        if (succinct_mod.isEnabled()) {
+            const success_msg = try std.fmt.allocPrint(allocator, "ok clone {s} into {s}\n", .{source_url, target_dir});
+            defer allocator.free(success_msg);
+            try platform_impl.writeStdout(success_msg);
         }
     }
 }
