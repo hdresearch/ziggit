@@ -198,4 +198,4 @@ build.zig
 
 ## License
 
-MIT
+GPLv2
