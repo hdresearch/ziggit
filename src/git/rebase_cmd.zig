@@ -6,6 +6,7 @@ const refs = @import("refs.zig");
 const index_mod = @import("index.zig");
 const platform_mod = @import("../platform/platform.zig");
 const main_common = @import("../main_common.zig");
+const succinct_mod = @import("../succinct.zig");
 
 const Platform = platform_mod.Platform;
 
@@ -443,20 +444,34 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
     const force = opts.force_rebase or opts.has_exec;
     if (is_noop and !force and !is_interactive) {
         if (!opts.quiet) {
-            const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date.\n", .{current_branch_name});
-            defer allocator.free(msg);
-            try platform_impl.writeStdout(msg);
+            if (succinct_mod.isEnabled()) {
+                const onto_short = if (onto_hash.len > 7) onto_hash[0..7] else onto_hash;
+                const msg = try std.fmt.allocPrint(allocator, "ok rebase {s} (up to date)\n", .{onto_short});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            } else {
+                const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date.\n", .{current_branch_name});
+                defer allocator.free(msg);
+                try platform_impl.writeStdout(msg);
+            }
         }
         return;
     }
     if (is_noop and force) {
         if (!opts.quiet) {
-            const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date, rebase forced.\n", .{current_branch_name});
-            defer allocator.free(msg);
-            if (opts.apply_mode) {
+            if (succinct_mod.isEnabled()) {
+                const onto_short = if (onto_hash.len > 7) onto_hash[0..7] else onto_hash;
+                const msg = try std.fmt.allocPrint(allocator, "ok rebase {s} (forced)\n", .{onto_short});
+                defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             } else {
-                try platform_impl.writeStderr(msg);
+                const msg = try std.fmt.allocPrint(allocator, "Current branch {s} is up to date, rebase forced.\n", .{current_branch_name});
+                defer allocator.free(msg);
+                if (opts.apply_mode) {
+                    try platform_impl.writeStdout(msg);
+                } else {
+                    try platform_impl.writeStderr(msg);
+                }
             }
         }
     }
@@ -609,9 +624,16 @@ fn startRebase(git_path: []const u8, repo_root: []const u8, allocator: std.mem.A
             if (is_same_order) {
                 cleanupRebaseState(git_path, allocator);
                 if (!opts.quiet) {
-                    try platform_impl.writeStderr("Successfully rebased and updated refs/heads/");
-                    try platform_impl.writeStderr(current_branch_name);
-                    try platform_impl.writeStderr(".\n");
+                    if (succinct_mod.isEnabled()) {
+                        const onto_display = opts.onto orelse opts.upstream_arg orelse "HEAD";
+                        const msg = try std.fmt.allocPrint(allocator, "ok rebase {s}\n", .{onto_display});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStdout(msg);
+                    } else {
+                        try platform_impl.writeStderr("Successfully rebased and updated refs/heads/");
+                        try platform_impl.writeStderr(current_branch_name);
+                        try platform_impl.writeStderr(".\n");
+                    }
                 }
                 return;
             }
@@ -886,12 +908,18 @@ fn executeTodoList(git_path: []const u8, repo_root: []const u8, branch_name: []c
                 }
 
                 if (!quiet) {
-                    try platform_impl.writeStderr("Stopped at ");
-                    try platform_impl.writeStderr(item.hash[0..@min(7, item.hash.len)]);
-                    try platform_impl.writeStderr("... ");
-                    const subj = getCommitSubject(item.hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
-                    defer allocator.free(subj);
-                    try platform_impl.writeStderr(subj);
+                    if (succinct_mod.isEnabled()) {
+                        const msg = try std.fmt.allocPrint(allocator, "conflict rebase {s}\n", .{item.hash[0..@min(7, item.hash.len)]});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                    } else {
+                        try platform_impl.writeStderr("Stopped at ");
+                        try platform_impl.writeStderr(item.hash[0..@min(7, item.hash.len)]);
+                        try platform_impl.writeStderr("... ");
+                        const subj = getCommitSubject(item.hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
+                        defer allocator.free(subj);
+                        try platform_impl.writeStderr(subj);
+                    }
                     try platform_impl.writeStderr("\n");
                 }
                 std.process.exit(0);
@@ -1003,13 +1031,20 @@ fn executePick(git_path: []const u8, hash: []const u8, original_line: []const u8
 
             const subj = getCommitSubject(full_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
             defer allocator.free(subj);
-            const err_msg = try std.fmt.allocPrint(allocator, "error: could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
-            defer allocator.free(err_msg);
-            try platform_impl.writeStderr(err_msg);
-            try platform_impl.writeStderr("hint: Resolve all conflicts manually, mark them as resolved with\nhint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\nhint: You can instead skip this commit: run \"git rebase --skip\".\nhint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".\n");
-            const could_not_msg = try std.fmt.allocPrint(allocator, "Could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
-            defer allocator.free(could_not_msg);
-            try platform_impl.writeStderr(could_not_msg);
+            if (succinct_mod.isEnabled()) {
+                const short_hash = hash[0..@min(7, hash.len)];
+                const conflict_msg = try std.fmt.allocPrint(allocator, "conflict rebase {s}\n", .{short_hash});
+                defer allocator.free(conflict_msg);
+                try platform_impl.writeStderr(conflict_msg);
+            } else {
+                const err_msg = try std.fmt.allocPrint(allocator, "error: could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+                try platform_impl.writeStderr("hint: Resolve all conflicts manually, mark them as resolved with\nhint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".\nhint: You can instead skip this commit: run \"git rebase --skip\".\nhint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".\n");
+                const could_not_msg = try std.fmt.allocPrint(allocator, "Could not apply {s}... {s}\n", .{ hash[0..@min(7, hash.len)], subj });
+                defer allocator.free(could_not_msg);
+                try platform_impl.writeStderr(could_not_msg);
+            }
             std.process.exit(1);
         }
         // Other error - append to done and continue
@@ -1157,11 +1192,18 @@ fn executeSquashFixup(git_path: []const u8, item: TodoItem, dir_name: []const u8
     } else |err| {
         if (err == error.MergeConflict) {
             try appendDone(git_path, dir_name, item.original_line, allocator, platform_impl);
-            const subj = getCommitSubject(full_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
-            defer allocator.free(subj);
-            const err_msg = try std.fmt.allocPrint(allocator, "CONFLICT: could not apply {s}... {s}\n", .{ item.hash[0..@min(7, item.hash.len)], subj });
-            defer allocator.free(err_msg);
-            try platform_impl.writeStderr(err_msg);
+            if (succinct_mod.isEnabled()) {
+                const short_hash = item.hash[0..@min(7, item.hash.len)];
+                const conflict_msg = try std.fmt.allocPrint(allocator, "conflict rebase {s}\n", .{short_hash});
+                defer allocator.free(conflict_msg);
+                try platform_impl.writeStderr(conflict_msg);
+            } else {
+                const subj = getCommitSubject(full_hash, git_path, platform_impl, allocator) catch try allocator.dupe(u8, "");
+                defer allocator.free(subj);
+                const err_msg = try std.fmt.allocPrint(allocator, "CONFLICT: could not apply {s}... {s}\n", .{ item.hash[0..@min(7, item.hash.len)], subj });
+                defer allocator.free(err_msg);
+                try platform_impl.writeStderr(err_msg);
+            }
             std.process.exit(1);
         }
     }
@@ -1379,9 +1421,15 @@ fn rebaseContinue(git_path: []const u8, repo_root: []const u8, allocator: std.me
                     allocator.free(c);
                 }
                 if (!quiet) {
-                    try platform_impl.writeStderr("Stopped at ");
-                    try platform_impl.writeStderr(item.hash[0..@min(7, item.hash.len)]);
-                    try platform_impl.writeStderr("...\n");
+                    if (succinct_mod.isEnabled()) {
+                        const msg = try std.fmt.allocPrint(allocator, "conflict rebase {s}\n", .{item.hash[0..@min(7, item.hash.len)]});
+                        defer allocator.free(msg);
+                        try platform_impl.writeStderr(msg);
+                    } else {
+                        try platform_impl.writeStderr("Stopped at ");
+                        try platform_impl.writeStderr(item.hash[0..@min(7, item.hash.len)]);
+                        try platform_impl.writeStderr("...\n");
+                    }
                 }
                 std.process.exit(0);
             },
@@ -1688,13 +1736,23 @@ fn finishRebase(git_path: []const u8, branch_name: []const u8, quiet: bool, appl
     platform_impl.fs.deleteFile(rebase_head_path) catch {};
 
     if (!quiet) {
-        try platform_impl.writeStderr("Successfully rebased and updated ");
-        if (std.mem.eql(u8, branch_name, "HEAD")) {
-            try platform_impl.writeStderr("HEAD.\n");
+        if (succinct_mod.isEnabled()) {
+            const onto = readRebaseFile(git_path, "onto", allocator, platform_impl) orelse try allocator.dupe(u8, "target");
+            defer allocator.free(onto);
+            const onto_trimmed = std.mem.trim(u8, onto, " \t\n\r");
+            const onto_short = if (onto_trimmed.len > 7) onto_trimmed[0..7] else onto_trimmed;
+            const msg = try std.fmt.allocPrint(allocator, "ok rebase {s}\n", .{onto_short});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
         } else {
-            const ref_msg = try std.fmt.allocPrint(allocator, "refs/heads/{s}.\n", .{branch_name});
-            defer allocator.free(ref_msg);
-            try platform_impl.writeStderr(ref_msg);
+            try platform_impl.writeStderr("Successfully rebased and updated ");
+            if (std.mem.eql(u8, branch_name, "HEAD")) {
+                try platform_impl.writeStderr("HEAD.\n");
+            } else {
+                const ref_msg = try std.fmt.allocPrint(allocator, "refs/heads/{s}.\n", .{branch_name});
+                defer allocator.free(ref_msg);
+                try platform_impl.writeStderr(ref_msg);
+            }
         }
     }
 }
@@ -1732,10 +1790,17 @@ fn doFastForward(git_path: []const u8, head_hash: []const u8, onto_hash: []const
 
     checkoutCommitTree(git_path, onto_hash, allocator, platform_impl) catch {};
     if (!opts.quiet) {
-        const ff_branch = if (std.mem.eql(u8, current_branch_name, "HEAD")) "HEAD" else current_branch_name;
-        const ff_msg = try std.fmt.allocPrint(allocator, "Fast-forwarded {s} to {s}.\n", .{ ff_branch, ff_upstream_name });
-        defer allocator.free(ff_msg);
-        try platform_impl.writeStdout(ff_msg);
+        if (succinct_mod.isEnabled()) {
+            const onto_short = if (onto_hash.len > 7) onto_hash[0..7] else onto_hash;
+            const msg = try std.fmt.allocPrint(allocator, "ok rebase {s}\n", .{onto_short});
+            defer allocator.free(msg);
+            try platform_impl.writeStdout(msg);
+        } else {
+            const ff_branch = if (std.mem.eql(u8, current_branch_name, "HEAD")) "HEAD" else current_branch_name;
+            const ff_msg = try std.fmt.allocPrint(allocator, "Fast-forwarded {s} to {s}.\n", .{ ff_branch, ff_upstream_name });
+            defer allocator.free(ff_msg);
+            try platform_impl.writeStdout(ff_msg);
+        }
     }
 }
 
