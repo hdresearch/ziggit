@@ -1284,6 +1284,11 @@ pub const GitObject = struct {
         const obj_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ obj_dir_path, obj_file });
         defer allocator.free(obj_file_path);
 
+        // Content-addressed: if object already exists, skip writing
+        if (std.fs.cwd().access(obj_file_path, .{})) |_| {
+            return try allocator.dupe(u8, hash_str);
+        } else |_| {}
+
         // Create the object content
         const header = try std.fmt.allocPrint(allocator, "{s} {}\x00", .{ self.type.toString(), self.data.len });
         defer allocator.free(header);
