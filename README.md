@@ -111,7 +111,7 @@ ziggit compiles to a 142KB WASM binary (55KB gzipped) with 68 named exports — 
 Build it:
 
 ```bash
-zig build --step wasm
+zig build wasm
 ```
 
 The output is at `zig-out/wasm/ziggit.wasm`. A ready-to-use demo is in the `wasm/` directory — serve it with any static file server:

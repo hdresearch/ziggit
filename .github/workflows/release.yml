@@ -59,7 +59,7 @@ jobs:
 
       - name: Build WASM
         run: |
-          zig build --step wasm
+          zig build wasm
           cp zig-out/wasm/ziggit.wasm ziggit.wasm
           gzip -k ziggit.wasm
 
