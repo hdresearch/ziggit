@@ -27,7 +27,7 @@ jobs:
         run: zig build -Doptimize=ReleaseFast
 
       - name: Build WASM
-        run: zig build --step wasm
+        run: zig build wasm
 
       - name: Smoke test
         run: |
