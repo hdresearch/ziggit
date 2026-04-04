@@ -8,7 +8,14 @@ A modern git implementation written in pure Zig. Drop-in replacement for `git` â
 
 ## Install
 
-### Download a release (easiest)
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap hdresearch/tap
+brew install ziggit
+```
+
+### Download a release
 
 Grab the latest binary for your platform from [GitHub Releases](https://github.com/hdresearch/ziggit/releases/latest):
 
