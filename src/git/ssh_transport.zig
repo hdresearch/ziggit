@@ -276,9 +276,124 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     };
 }
 
+/// Push result from SSH push: contains the remote's response for status parsing
+pub const PushResult = struct {
+    refs: []Ref,
+    capabilities: []const u8,
+    response: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *PushResult) void {
+        for (self.refs) |ref| self.allocator.free(ref.name);
+        self.allocator.free(self.refs);
+        self.allocator.free(self.capabilities);
+        self.allocator.free(self.response);
+    }
+};
+
+/// Discover refs from a remote via SSH git-receive-pack (for push)
+pub fn discoverRefsReceivePackSsh(allocator: std.mem.Allocator, url: []const u8) !struct { discovery: smart_http.RefDiscovery, process: std.process.Child } {
+    const parsed = try parseSshUrl(url);
+
+    var process = try spawnSshReceivePack(allocator, parsed);
+    errdefer destroyProcess(&process);
+
+    // Read ref advertisement (same format as upload-pack)
+    var discovery = try readRefAdvertisementFromPipe(allocator, &process);
+    errdefer discovery.deinit();
+
+    return .{ .discovery = discovery, .process = process };
+}
+
+/// Push objects to a remote via SSH git-receive-pack.
+/// Sends ref update + pack data, returns the server response.
+pub fn sendReceivePackSsh(
+    allocator: std.mem.Allocator,
+    process: *std.process.Child,
+    old_hash: []const u8,
+    new_hash: []const u8,
+    ref_name: []const u8,
+    pack_data: []const u8,
+) ![]u8 {
+    // Build pkt-line request body
+    var body = std.array_list.Managed(u8).init(allocator);
+    defer body.deinit();
+
+    // ref update line: "<old> <new> <refname>\0 report-status\n"
+    const ref_line = try std.fmt.allocPrint(allocator, "{s} {s} {s}\x00 report-status\n", .{ old_hash, new_hash, ref_name });
+    defer allocator.free(ref_line);
+
+    const pkt = try smart_http.writePktLine(allocator, ref_line);
+    defer allocator.free(pkt);
+    try body.appendSlice(pkt);
+
+    // flush
+    try body.appendSlice(smart_http.writeFlushPkt());
+
+    // pack data
+    try body.appendSlice(pack_data);
+
+    // Send everything to stdin
+    try writeToStdin(process, body.items);
+    try closeStdin(process);
+
+    // Read response from stdout
+    const response = readAllFromPipe(allocator, process) catch |err| {
+        // If pipe is closed, check stderr for error messages
+        if (process.stderr) |*stderr| {
+            const err_msg = stderr.readToEndAlloc(allocator, 4096) catch return err;
+            defer allocator.free(err_msg);
+        }
+        return err;
+    };
+
+    return response;
+}
+
 // ============================================================================
 // Internal helpers
 // ============================================================================
+
+fn spawnSshReceivePack(allocator: std.mem.Allocator, parsed: SshUrl) !std.process.Child {
+    // Build the ssh command
+    // ssh [-p port] user@host "git-receive-pack '/path'"
+    var argv = std.array_list.Managed([]const u8).init(allocator);
+    defer argv.deinit();
+
+    try argv.append("ssh");
+
+    // Disable strict host key checking for non-interactive use
+    try argv.append("-o");
+    try argv.append("BatchMode=yes");
+    try argv.append("-o");
+    try argv.append("StrictHostKeyChecking=accept-new");
+
+    if (parsed.port) |port| {
+        try argv.append("-p");
+        var port_buf: [8]u8 = undefined;
+        const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
+        try argv.append(try allocator.dupe(u8, port_str));
+    }
+
+    // user@host
+    const user_host = try std.fmt.allocPrint(allocator, "{s}@{s}", .{ parsed.user, parsed.host });
+    try argv.append(user_host);
+
+    // git-receive-pack command with quoted path
+    const cmd = if (parsed.absolute_path)
+        try std.fmt.allocPrint(allocator, "git-receive-pack '/{s}'", .{parsed.path})
+    else
+        try std.fmt.allocPrint(allocator, "git-receive-pack '{s}'", .{parsed.path});
+    try argv.append(cmd);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    try child.spawn();
+    return child;
+}
 
 fn spawnSshUploadPack(allocator: std.mem.Allocator, parsed: SshUrl) !std.process.Child {
     // Build the ssh command
@@ -327,6 +442,10 @@ fn destroyProcess(process: *std.process.Child) void {
     if (process.stdout) |*stdout| stdout.close();
     if (process.stderr) |*stderr| stderr.close();
     _ = process.kill() catch {};
+}
+
+pub fn destroyProcessPublic(process: *std.process.Child) void {
+    destroyProcess(process);
 }
 
 fn writeToStdin(process: *std.process.Child, data: []const u8) !void {
