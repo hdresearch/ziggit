@@ -23,6 +23,57 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
+/// Shared output logic for ref discovery results (HTTPS and SSH paths).
+fn outputRefDiscovery(
+    allocator: std.mem.Allocator,
+    comptime RefType: type,
+    in_refs: []RefType,
+    capabilities: []const u8,
+    show_tags: bool,
+    show_heads: bool,
+    patterns: *std.array_list.Managed([]const u8),
+    symref_flag: bool,
+    ecf: bool,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    // Sort refs: HEAD first, then alphabetically
+    std.mem.sort(RefType, in_refs, {}, struct {
+        fn lt(_: void, a: RefType, b: RefType) bool {
+            if (std.mem.eql(u8, a.name, "HEAD")) return true;
+            if (std.mem.eql(u8, b.name, "HEAD")) return false;
+            return std.mem.order(u8, a.name, b.name).compare(.lt);
+        }
+    }.lt);
+
+    var fa = false;
+    for (in_refs) |ref| {
+        if (show_tags and !show_heads and !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
+        if (show_heads and !show_tags and !std.mem.startsWith(u8, ref.name, "refs/heads/")) continue;
+        if (show_heads and show_tags and !std.mem.startsWith(u8, ref.name, "refs/heads/") and !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
+        if (patterns.items.len > 0) {
+            var m = false;
+            for (patterns.items) |p| {
+                if (helpers.t5LsMatch(ref.name, p)) { m = true; break; }
+            }
+            if (!m) continue;
+        }
+        fa = true;
+        if (symref_flag and std.mem.eql(u8, ref.name, "HEAD")) {
+            if (std.mem.indexOf(u8, capabilities, "symref=HEAD:")) |si| {
+                const rest = capabilities[si + "symref=HEAD:".len ..];
+                const end = std.mem.indexOfAny(u8, rest, " \t\n") orelse rest.len;
+                const so = try std.fmt.allocPrint(allocator, "ref: {s}\tHEAD\n", .{rest[0..end]});
+                defer allocator.free(so);
+                try platform_impl.writeStdout(so);
+            }
+        }
+        const o = try std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ref.hash, ref.name});
+        defer allocator.free(o);
+        try platform_impl.writeStdout(o);
+    }
+    if (ecf and !fa) std.process.exit(2);
+}
+
 pub fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, command_index: usize, platform_impl: *const platform_mod.Platform) !void {
     var show_tags = false; var show_heads = false; var symref_flag = false;
     var quiet = false; var ecf = false; var get_url = false;
@@ -81,35 +132,23 @@ pub fn nativeCmdLsRemote(allocator: std.mem.Allocator, args: [][]const u8, comma
         };
         defer discovery.deinit();
 
-        // Sort refs: HEAD first, then alphabetically
-        std.mem.sort(smart_http.Ref, discovery.refs, {}, struct {
-            fn lt(_: void, a: smart_http.Ref, b: smart_http.Ref) bool {
-                if (std.mem.eql(u8, a.name, "HEAD")) return true;
-                if (std.mem.eql(u8, b.name, "HEAD")) return false;
-                return std.mem.order(u8, a.name, b.name).compare(.lt);
-            }
-        }.lt);
+        try outputRefDiscovery(allocator, smart_http.Ref, discovery.refs, discovery.capabilities, show_tags, show_heads, &patterns, symref_flag, ecf, platform_impl);
+        return;
+    }
 
-        var fa = false;
-        for (discovery.refs) |ref| {
-            if (show_tags and !show_heads and !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
-            if (show_heads and !show_tags and !std.mem.startsWith(u8, ref.name, "refs/heads/")) continue;
-            if (show_heads and show_tags and !std.mem.startsWith(u8, ref.name, "refs/heads/") and !std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
-            if (patterns.items.len > 0) { var m = false; for (patterns.items) |p| { if (helpers.t5LsMatch(ref.name, p)) { m = true; break; } } if (!m) continue; }
-            fa = true;
-            if (symref_flag and std.mem.eql(u8, ref.name, "HEAD")) {
-                // Check capabilities for symref info
-                if (std.mem.indexOf(u8, discovery.capabilities, "symref=HEAD:")) |si| {
-                    const rest = discovery.capabilities[si + "symref=HEAD:".len ..];
-                    const end = std.mem.indexOfAny(u8, rest, " \t\n") orelse rest.len;
-                    const so = try std.fmt.allocPrint(allocator, "ref: {s}\tHEAD\n", .{rest[0..end]});
-                    defer allocator.free(so); try platform_impl.writeStdout(so);
-                }
-            }
-            const o = try std.fmt.allocPrint(allocator, "{s}\t{s}\n", .{ref.hash, ref.name}); defer allocator.free(o);
-            try platform_impl.writeStdout(o);
-        }
-        if (ecf and !fa) std.process.exit(2);
+    // SSH path: use SSH transport for ref discovery
+    const ssh_transport = @import("git/ssh_transport.zig");
+    if (ssh_transport.isSshUrl(effective_url)) {
+        const smart_http = @import("git/smart_http.zig");
+        const fm = try std.fmt.allocPrint(allocator, "From {s}\n", .{effective_url}); defer allocator.free(fm);
+        try platform_impl.writeStderr(fm);
+        var discovery = ssh_transport.discoverRefsSsh(allocator, effective_url) catch {
+            const msg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n", .{rn});
+            defer allocator.free(msg); try platform_impl.writeStderr(msg); std.process.exit(128);
+        };
+        defer discovery.deinit();
+
+        try outputRefDiscovery(allocator, smart_http.Ref, discovery.refs, discovery.capabilities, show_tags, show_heads, &patterns, symref_flag, ecf, platform_impl);
         return;
     }
 

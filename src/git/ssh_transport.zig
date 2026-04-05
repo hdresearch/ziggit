@@ -276,6 +276,18 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     };
 }
 
+/// Discover refs from a remote via SSH git-upload-pack (for ls-remote / fetch).
+/// Spawns the SSH process, reads the ref advertisement, and cleans up.
+pub fn discoverRefsSsh(allocator: std.mem.Allocator, url: []const u8) !smart_http.RefDiscovery {
+    const parsed = try parseSshUrl(url);
+
+    var process = try spawnSshUploadPack(allocator, parsed);
+    defer destroyProcess(&process);
+
+    // Read ref advertisement (pkt-lines until flush)
+    return readRefAdvertisementFromPipe(allocator, &process);
+}
+
 /// Push result from SSH push: contains the remote's response for status parsing
 pub const PushResult = struct {
     refs: []Ref,
