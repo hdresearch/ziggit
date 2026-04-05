@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = exe_optimize,
+            .strip = optimize != .Debug,
             .imports = &.{
                 .{ .name = "build_options", .module = options.createModule() },
             },

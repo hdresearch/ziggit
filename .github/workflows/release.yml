@@ -96,3 +96,88 @@ jobs:
         with:
           generate_release_notes: true
           files: release/*
+
+  update-homebrew:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute SHA256 hashes
+        id: hashes
+        run: |
+          echo "macos_aarch64=$(sha256sum artifacts/ziggit-macos-aarch64/ziggit-macos-aarch64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "macos_x86_64=$(sha256sum artifacts/ziggit-macos-x86_64/ziggit-macos-x86_64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_aarch64=$(sha256sum artifacts/ziggit-linux-aarch64/ziggit-linux-aarch64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_x86_64=$(sha256sum artifacts/ziggit-linux-x86_64/ziggit-linux-x86_64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula
+        uses: actions/checkout@v4
+        with:
+          repository: hdresearch/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Write formula
+        run: |
+          cat > homebrew-tap/Formula/ziggit.rb << 'FORMULA'
+          class Ziggit < Formula
+            desc "A modern git implementation written in pure Zig — 4-10× faster, 142KB WASM, succinct mode for LLMs"
+            homepage "https://github.com/hdresearch/ziggit"
+            version "${{ steps.version.outputs.version }}"
+            license "GPL-2.0-only"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/hdresearch/ziggit/releases/download/v#{version}/ziggit-macos-aarch64"
+                sha256 "${{ steps.hashes.outputs.macos_aarch64 }}"
+              end
+
+              on_intel do
+                url "https://github.com/hdresearch/ziggit/releases/download/v#{version}/ziggit-macos-x86_64"
+                sha256 "${{ steps.hashes.outputs.macos_x86_64 }}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/hdresearch/ziggit/releases/download/v#{version}/ziggit-linux-aarch64"
+                sha256 "${{ steps.hashes.outputs.linux_aarch64 }}"
+              end
+
+              on_intel do
+                url "https://github.com/hdresearch/ziggit/releases/download/v#{version}/ziggit-linux-x86_64"
+                sha256 "${{ steps.hashes.outputs.linux_x86_64 }}"
+              end
+            end
+
+            def install
+              binary = Dir.glob("ziggit-*").first
+              if binary.nil?
+                binary = Dir.glob("ziggit*").reject { |f| f.end_with?(".rb") }.first
+              end
+              bin.install binary => "ziggit"
+            end
+
+            test do
+              assert_match "git version", shell_output("#{bin}/ziggit --version")
+            end
+          end
+          FORMULA
+
+      - name: Commit and push formula
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ziggit.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "ziggit ${{ steps.version.outputs.version }}"
+          git push
