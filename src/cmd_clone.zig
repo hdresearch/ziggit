@@ -361,8 +361,14 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     // helpers.Strip trailing slashes from target directory
     const final_target_dir = std.mem.trimRight(u8, raw_target_dir, "/");
     
-    // helpers.For non-HTTP URLs (local paths, ssh://, git://), handle local clone natively
-    if (!(std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://"))) {
+    // helpers.For local paths and file:// URLs, handle local clone natively
+    const ssh_transport_check = @import("git/ssh_transport.zig");
+    const is_network_url = std.mem.startsWith(u8, url.?, "https://") or
+        std.mem.startsWith(u8, url.?, "http://") or
+        std.mem.startsWith(u8, url.?, "ssh://") or
+        std.mem.startsWith(u8, url.?, "git://") or
+        ssh_transport_check.isSshUrl(url.?);
+    if (!is_network_url) {
         // helpers.Parse --branch and --origin flags
         var clone_branch: ?[]const u8 = null;
         var clone_origin: ?[]const u8 = null;
@@ -392,15 +398,6 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 try platform_impl.writeStderr(msg);
                 std.process.exit(128);
             }
-        }
-
-        // helpers.For SSH and git:// protocols, show error (SSH transport not yet fully integrated into clone)
-        if (std.mem.startsWith(u8, url.?, "ssh://") or std.mem.startsWith(u8, url.?, "git://") or
-            (std.mem.indexOf(u8, url.?, ":") != null and std.mem.indexOf(u8, url.?, "/") != null and
-             (std.mem.indexOf(u8, url.?, ":").? < std.mem.indexOf(u8, url.?, "/").?) and !std.mem.startsWith(u8, url.?, "/") and !std.mem.startsWith(u8, url.?, "file://")))
-        {
-            try platform_impl.writeStderr("fatal: SSH/git:// clone not yet supported natively\n");
-            std.process.exit(128);
         }
 
         // helpers.Check if target directory already exists and is non-empty
@@ -459,8 +456,10 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         try platform_impl.writeStderr(clone_msg);
     }
     
-    // helpers.For HTTPS URLs, use native smart HTTP clone + checkout
-    if (std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://")) {
+    // helpers.For HTTPS and SSH URLs, use native smart clone + checkout
+    const ssh_transport = @import("git/ssh_transport.zig");
+    if (std.mem.startsWith(u8, url.?, "https://") or std.mem.startsWith(u8, url.?, "http://") or
+        std.mem.startsWith(u8, url.?, "ssh://") or ssh_transport.isSshUrl(url.?)) {
         const ziggit = @import("ziggit.zig");
         const bare_target = try std.fmt.allocPrint(allocator, "{s}/.git", .{final_target_dir});
         defer allocator.free(bare_target);
