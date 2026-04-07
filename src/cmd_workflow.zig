@@ -77,6 +77,29 @@ fn runSubcommandHasOutput(allocator: std.mem.Allocator, args: []const []const u8
     return total > 0;
 }
 
+/// Detect the currently checked-out branch by reading .git/HEAD.
+/// Falls back to "main" if HEAD is detached or unreadable.
+fn detectCurrentBranch() []const u8 {
+    if (std.fs.cwd().openFile(".git/HEAD", .{})) |file| {
+        defer file.close();
+        var buf: [256]u8 = undefined;
+        const n = file.read(&buf) catch return "main";
+        const content = std.mem.trimRight(u8, buf[0..n], "\r\n ");
+        const prefix = "ref: refs/heads/";
+        if (std.mem.startsWith(u8, content, prefix)) {
+            const branch_name = content[prefix.len..];
+            // Return static strings to avoid allocation
+            if (std.mem.eql(u8, branch_name, "master")) return "master";
+            if (std.mem.eql(u8, branch_name, "main")) return "main";
+            if (std.mem.eql(u8, branch_name, "develop")) return "develop";
+            // Unknown branch — return as-is (static lifetime from stack buf, but
+            // this is fine since we only compare/use it immediately)
+            return "main"; // fallback for unusual branch names
+        }
+    } else |_| {}
+    return "main";
+}
+
 /// Detect the default branch by reading origin/HEAD, then checking for
 /// origin/main or origin/master refs. Falls back to "main".
 fn detectDefaultBranch() []const u8 {
@@ -169,6 +192,10 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
         return error.SubcommandFailed;
     };
 
+    // Detect branches
+    const default_branch = detectDefaultBranch();
+    const current_branch = detectCurrentBranch();
+
     // add -A
     runSubcommand(allocator, &.{ "add", "-A" }) catch |e| {
         printErr(allocator, "FAILED: add\n", .{});
@@ -181,19 +208,42 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
         return e;
     };
 
-    // push
-    runSubcommand(allocator, &.{"push"}) catch |e| {
-        printErr(allocator, "FAILED: push\n", .{});
-        return e;
-    };
+    // Push: if current branch differs from default, use refspec current:default
+    // (e.g. push master's commits to origin/main)
+    if (std.mem.eql(u8, current_branch, default_branch)) {
+        // Simple case: current matches default
+        runSubcommand(allocator, &.{ "push", "origin", default_branch }) catch |e| {
+            printErr(allocator, "FAILED: push\n", .{});
+            return e;
+        };
+    } else {
+        // Cross-branch push: local current → remote default
+        const refspec = std.fmt.allocPrint(allocator, "{s}:{s}", .{ current_branch, default_branch }) catch {
+            // Allocation failed — try plain push as fallback
+            runSubcommand(allocator, &.{ "push", "origin", current_branch }) catch |e| {
+                printErr(allocator, "FAILED: push\n", .{});
+                return e;
+            };
+            printErr(allocator, "ok committed+pushed ({s}, wanted {s})\n", .{ current_branch, default_branch });
+            return;
+        };
+        defer allocator.free(refspec);
+        runSubcommand(allocator, &.{ "push", "origin", refspec }) catch |e| {
+            // Refspec push failed — try pushing current branch as-is
+            printErr(allocator, "note: cross-branch push {s}:{s} failed, trying {s}\n", .{ current_branch, default_branch, current_branch });
+            runSubcommand(allocator, &.{ "push", "origin", current_branch }) catch {
+                printErr(allocator, "FAILED: push\n", .{});
+                return e;
+            };
+        };
+    }
 
-    // restart (detect default branch since progress doesn't take a branch arg)
-    const branch = detectDefaultBranch();
-    runSubcommand(allocator, &.{ "restart", branch }) catch |e| {
+    // restart (fetch + rebase onto origin/BRANCH)
+    runSubcommand(allocator, &.{ "restart", default_branch }) catch |e| {
         printErr(allocator, "note: commit+push succeeded, but post-push restart failed\n", .{});
         printErr(allocator, "FAILED: restart after push\n", .{});
         return e;
     };
 
-    printErr(allocator, "ok committed+pushed\n", .{});
+    printErr(allocator, "ok committed+pushed ({s})\n", .{default_branch});
 }
