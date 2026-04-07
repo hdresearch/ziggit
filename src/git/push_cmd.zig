@@ -9,6 +9,107 @@ const hooks = @import("../git/hooks.zig");
 const smart_http = @import("smart_http.zig");
 const ssh_transport = @import("ssh_transport.zig");
 
+/// Convert an SSH URL to HTTPS.
+/// git@github.com:org/repo.git → https://github.com/org/repo.git
+/// ssh://git@github.com/org/repo.git → https://github.com/org/repo.git
+fn sshToHttps(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
+    // ssh://[user@]host/path
+    if (std.mem.startsWith(u8, url, "ssh://")) {
+        const rest = url["ssh://".len..];
+        // Skip user@ if present
+        const after_user = if (std.mem.indexOf(u8, rest, "@")) |at| rest[at + 1 ..] else rest;
+        return std.fmt.allocPrint(allocator, "https://{s}", .{after_user}) catch null;
+    }
+    // user@host:path (SCP-style)
+    if (std.mem.indexOf(u8, url, "@")) |at| {
+        const after_at = url[at + 1 ..];
+        if (std.mem.indexOf(u8, after_at, ":")) |colon| {
+            const host = after_at[0..colon];
+            const path = after_at[colon + 1 ..];
+            return std.fmt.allocPrint(allocator, "https://{s}/{s}", .{ host, path }) catch null;
+        }
+    }
+    return null;
+}
+
+/// Convert an HTTPS URL to SSH (SCP-style).
+/// https://github.com/org/repo.git → git@github.com:org/repo.git
+/// https://TOKEN@github.com/org/repo.git → git@github.com:org/repo.git
+fn httpsToSsh(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
+    const prefix = if (std.mem.startsWith(u8, url, "https://"))
+        url["https://".len..]
+    else if (std.mem.startsWith(u8, url, "http://"))
+        url["http://".len..]
+    else
+        return null;
+
+    // Strip embedded credentials (TOKEN@host or user:pass@host)
+    const after_auth = if (std.mem.indexOf(u8, prefix, "@")) |at| prefix[at + 1 ..] else prefix;
+
+    // Split host/path at first /
+    const slash = std.mem.indexOf(u8, after_auth, "/") orelse return null;
+    const host = after_auth[0..slash];
+    const path = after_auth[slash + 1 ..];
+    if (path.len == 0) return null;
+
+    return std.fmt.allocPrint(allocator, "git@{s}:{s}", .{ host, path }) catch null;
+}
+
+/// Update the remote URL in .git/config.
+fn updateRemoteUrl(allocator: std.mem.Allocator, git_path: []const u8, remote_name: []const u8, new_url: []const u8) void {
+    const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
+    defer allocator.free(config_path);
+    const content = readFileContent(allocator, config_path) catch return;
+    defer allocator.free(content);
+
+    const section_header = std.fmt.allocPrint(allocator, "[remote \"{s}\"]", .{remote_name}) catch return;
+    defer allocator.free(section_header);
+
+    const section_start = std.mem.indexOf(u8, content, section_header) orelse return;
+    const after_header = section_start + section_header.len;
+
+    // Find the url = ... line within this section
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    result.appendSlice(content[0..after_header]) catch return;
+
+    var rest = content[after_header..];
+    var replaced = false;
+    while (rest.len > 0) {
+        const nl = std.mem.indexOf(u8, rest, "\n") orelse rest.len;
+        const line = rest[0..nl];
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        if (!replaced and trimmed.len > 0 and trimmed[0] == '[') {
+            // Hit next section without finding url — shouldn't happen, bail
+            result.appendSlice(rest) catch return;
+            break;
+        }
+
+        if (!replaced and std.mem.startsWith(u8, trimmed, "url = ")) {
+            const new_line = std.fmt.allocPrint(allocator, "\n\turl = {s}", .{new_url}) catch return;
+            defer allocator.free(new_line);
+            result.appendSlice(new_line) catch return;
+            replaced = true;
+        } else {
+            result.append('\n') catch return;
+            result.appendSlice(line) catch return;
+        }
+
+        if (nl < rest.len) {
+            rest = rest[nl + 1 ..];
+        } else {
+            break;
+        }
+    }
+
+    if (!replaced) return;
+
+    const f = std.fs.cwd().createFile(config_path, .{}) catch return;
+    defer f.close();
+    f.writeAll(result.items) catch {};
+}
+
 fn readFileContent(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024);
 }
@@ -400,14 +501,66 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     else
         remote_url;
 
-    // Network push via smart HTTP
+    // Network push — try primary transport, fall back to alternate URL format
     if (std.mem.startsWith(u8, actual_url, "http://") or std.mem.startsWith(u8, actual_url, "https://")) {
-        try pushSmartHttp(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
+        pushSmartHttp(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err| {
+            if (err != error.TransportFailed) return err;
+            // HTTPS failed — try SSH fallback
+            if (httpsToSsh(allocator, actual_url)) |alt_url| {
+                defer allocator.free(alt_url);
+                if (!quiet) {
+                    const msg = try std.fmt.allocPrint(allocator, "hint: HTTPS push failed, trying SSH: {s}\n", .{alt_url});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                pushSsh(allocator, git_path, alt_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err2| {
+                    if (err2 != error.TransportFailed) return err2;
+                    try platform_impl.writeStderr("fatal: unable to access remote repository via HTTPS or SSH\n");
+                    std.process.exit(128);
+                };
+                // SSH worked — update the remote URL
+                if (!quiet) {
+                    const msg = try std.fmt.allocPrint(allocator, "hint: SSH push succeeded, updating remote '{s}' to {s}\n", .{ remote, alt_url });
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                updateRemoteUrl(allocator, git_path, remote, alt_url);
+            } else {
+                try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+                std.process.exit(128);
+            }
+        };
         return;
     }
 
     if (std.mem.startsWith(u8, actual_url, "ssh://") or ssh_transport.isSshUrl(actual_url)) {
-        try pushSsh(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
+        pushSsh(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err| {
+            if (err != error.TransportFailed) return err;
+            // SSH failed — try HTTPS fallback
+            if (sshToHttps(allocator, actual_url)) |alt_url| {
+                defer allocator.free(alt_url);
+                if (!quiet) {
+                    const msg = try std.fmt.allocPrint(allocator, "hint: SSH push failed, trying HTTPS: {s}\n", .{alt_url});
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                pushSmartHttp(allocator, git_path, alt_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err2| {
+                    if (err2 != error.TransportFailed) return err2;
+                    try platform_impl.writeStderr("fatal: unable to access remote repository via SSH or HTTPS\n");
+                    std.process.exit(128);
+                };
+                // HTTPS worked — update the remote URL
+                if (!quiet) {
+                    const msg = try std.fmt.allocPrint(allocator, "hint: HTTPS push succeeded, updating remote '{s}' to {s}\n", .{ remote, alt_url });
+                    defer allocator.free(msg);
+                    try platform_impl.writeStderr(msg);
+                }
+                updateRemoteUrl(allocator, git_path, remote, alt_url);
+            } else {
+                try platform_impl.writeStderr("fatal: unable to access remote repository via SSH\n");
+                std.process.exit(128);
+            }
+        };
         return;
     }
 
@@ -1419,8 +1572,7 @@ fn pushSsh(
 
     // Discover remote refs via SSH git-receive-pack
     const state = ssh_transport.discoverRefsReceivePackSsh(allocator, url) catch {
-        try platform_impl.writeStderr("fatal: unable to access remote repository via SSH\n");
-        std.process.exit(128);
+        return error.TransportFailed;
     };
     var discovery = state.discovery;
     defer discovery.deinit();
@@ -1637,8 +1789,7 @@ fn pushSmartHttp(
 
     // Discover remote refs
     var discovery = smart_http.discoverRefsReceivePack(allocator, url) catch {
-        try platform_impl.writeStderr("fatal: unable to access remote repository\n");
-        std.process.exit(128);
+        return error.TransportFailed;
     };
     defer discovery.deinit();
 
@@ -1830,4 +1981,52 @@ fn pushSmartHttp(
             }
         }
     }
+}
+
+test "sshToHttps" {
+    const allocator = std.testing.allocator;
+
+    // SCP-style
+    {
+        const result = sshToHttps(allocator, "git@github.com:hdresearch/sterling.git").?;
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings("https://github.com/hdresearch/sterling.git", result);
+    }
+    // ssh:// style
+    {
+        const result = sshToHttps(allocator, "ssh://git@github.com/hdresearch/sterling.git").?;
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings("https://github.com/hdresearch/sterling.git", result);
+    }
+    // Not SSH
+    try std.testing.expect(sshToHttps(allocator, "https://github.com/org/repo.git") == null);
+    // No @ sign
+    try std.testing.expect(sshToHttps(allocator, "github.com/org/repo.git") == null);
+}
+
+test "httpsToSsh" {
+    const allocator = std.testing.allocator;
+
+    // Plain HTTPS
+    {
+        const result = httpsToSsh(allocator, "https://github.com/hdresearch/sterling.git").?;
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings("git@github.com:hdresearch/sterling.git", result);
+    }
+    // HTTPS with token
+    {
+        const result = httpsToSsh(allocator, "https://ghp_abc123@github.com/hdresearch/sterling.git").?;
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings("git@github.com:hdresearch/sterling.git", result);
+    }
+    // HTTP (not S)
+    {
+        const result = httpsToSsh(allocator, "http://github.com/org/repo.git").?;
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings("git@github.com:org/repo.git", result);
+    }
+    // Not HTTP
+    try std.testing.expect(httpsToSsh(allocator, "git@github.com:org/repo.git") == null);
+    // No path
+    try std.testing.expect(httpsToSsh(allocator, "https://github.com") == null);
 }
