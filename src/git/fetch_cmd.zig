@@ -980,8 +980,14 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         return;
     }
 
-    // For HTTPS URLs, use the existing HTTP fetch path
-    if (std.mem.startsWith(u8, remote_url, "https://") or std.mem.startsWith(u8, remote_url, "http://")) {
+    // For HTTPS and SSH URLs, use Repository.fetch() which handles both
+    const ssh_transport = @import("ssh_transport.zig");
+    const is_network = std.mem.startsWith(u8, remote_url, "https://") or
+        std.mem.startsWith(u8, remote_url, "http://") or
+        std.mem.startsWith(u8, remote_url, "ssh://") or
+        ssh_transport.isSshUrl(remote_url);
+
+    if (is_network) {
         const ziggit = @import("../ziggit.zig");
         const is_bare_repo = !std.mem.endsWith(u8, git_path, "/.git");
         const repo_path = if (is_bare_repo) git_path else (std.fs.path.dirname(git_path) orelse ".");
@@ -998,10 +1004,10 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             try platform_impl.writeStderr(msg);
             std.process.exit(128);
         };
-        
-        // Succinct mode: show fetch success for HTTP fetch
+
+        // Succinct mode: show fetch success
         if (succinct_mod.isEnabled() and !quiet) {
-            const msg = try std.fmt.allocPrint(allocator, "ok fetch {s} refs\n", .{remote_url});
+            const msg = try std.fmt.allocPrint(allocator, "ok fetch {s} refs\n", .{remote_name});
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
         }
@@ -2482,23 +2488,41 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             try platform_impl.writeStderr(emsg);
             std.process.exit(128);
         };
-    } else if (std.mem.startsWith(u8, actual_url, "http://") or std.mem.startsWith(u8, actual_url, "https://")) {
-        const network = @import("network.zig");
-        network.fetchRepository(allocator, remote_url, git_path, platform_impl) catch |err| switch (err) {
-            error.RepositoryNotFound => {
-                try platform_impl.writeStderr("fatal: repository not found\n");
-                std.process.exit(128);
-            },
-            else => {
-                try platform_impl.writeStderr("fatal: unable to access remote repository\n");
-                std.process.exit(128);
-            },
-        };
     } else {
-        const emsg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
-        defer allocator.free(emsg);
-        try platform_impl.writeStderr(emsg);
-        std.process.exit(128);
+        // Network fetch (HTTPS or SSH) via Repository.fetch()
+        const ssh_transport_pull = @import("ssh_transport.zig");
+        const is_network_pull = std.mem.startsWith(u8, actual_url, "http://") or
+            std.mem.startsWith(u8, actual_url, "https://") or
+            std.mem.startsWith(u8, actual_url, "ssh://") or
+            ssh_transport_pull.isSshUrl(actual_url);
+
+        if (is_network_pull) {
+            const ziggit = @import("../ziggit.zig");
+            const is_bare_repo = !std.mem.endsWith(u8, git_path, "/.git");
+            const repo_path = if (is_bare_repo) git_path else (std.fs.path.dirname(git_path) orelse ".");
+            var repo = ziggit.Repository.open(allocator, repo_path) catch |err| {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            };
+            defer repo.close();
+            repo.fetch(remote_url) catch |err| {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}': {}\n", .{ remote_url, err });
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            };
+
+            // Write FETCH_HEAD so the merge step below can find the merge target.
+            // Repository.fetch() updates tracking refs but doesn't write FETCH_HEAD.
+            writeFetchHeadFromTrackingRefs(allocator, git_path, remote, remote_url, merge_branch, platform_impl) catch {};
+        } else {
+            const emsg = try std.fmt.allocPrint(allocator, "fatal: '{s}' does not appear to be a git repository\n", .{remote});
+            defer allocator.free(emsg);
+            try platform_impl.writeStderr(emsg);
+            std.process.exit(128);
+        }
     }
 
     // Determine merge target
@@ -3294,4 +3318,66 @@ fn threeWayMerge(
         return allocator.dupe(u8, pullExtractTree(their_commit.data));
     }
     return allocator.dupe(u8, their_tree);
+}
+
+/// Write FETCH_HEAD after a network fetch (Repository.fetch doesn't do this).
+/// Reads the just-updated tracking refs under refs/remotes/<remote>/ and writes
+/// FETCH_HEAD in the format git expects for pull's merge step.
+fn writeFetchHeadFromTrackingRefs(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    remote_name: []const u8,
+    remote_url: []const u8,
+    merge_branch: ?[]const u8,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    _ = platform_impl;
+    var fetch_head = std.array_list.Managed(u8).init(allocator);
+    defer fetch_head.deinit();
+
+    // Determine the branch that should be marked "for-merge"
+    // merge_branch is typically "refs/heads/main" or "refs/heads/master" from config
+    const for_merge_short = if (merge_branch) |mb| blk: {
+        if (std.mem.startsWith(u8, mb, "refs/heads/")) break :blk mb["refs/heads/".len..];
+        break :blk mb;
+    } else null;
+
+    // Scan refs/remotes/<remote>/
+    const remotes_dir = try std.fmt.allocPrint(allocator, "{s}/refs/remotes/{s}", .{ git_path, remote_name });
+    defer allocator.free(remotes_dir);
+
+    var dir = std.fs.cwd().openDir(remotes_dir, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        const branch_name = entry.name;
+
+        const ref_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ remotes_dir, branch_name });
+        defer allocator.free(ref_path);
+        const content = std.fs.cwd().readFileAlloc(allocator, ref_path, 256) catch continue;
+        defer allocator.free(content);
+        const hash = std.mem.trim(u8, content, " \t\r\n");
+        if (hash.len < 40) continue;
+
+        const is_for_merge = if (for_merge_short) |fms| std.mem.eql(u8, branch_name, fms) else false;
+
+        if (is_for_merge) {
+            const line = try std.fmt.allocPrint(allocator, "{s}\t\tbranch '{s}' of {s}\n", .{ hash[0..40], branch_name, remote_url });
+            defer allocator.free(line);
+            // Insert for-merge entries at the beginning
+            try fetch_head.insertSlice(0, line);
+        } else {
+            const line = try std.fmt.allocPrint(allocator, "{s}\tnot-for-merge\tbranch '{s}' of {s}\n", .{ hash[0..40], branch_name, remote_url });
+            defer allocator.free(line);
+            try fetch_head.appendSlice(line);
+        }
+    }
+
+    if (fetch_head.items.len > 0) {
+        const fh_path = try std.fmt.allocPrint(allocator, "{s}/FETCH_HEAD", .{git_path});
+        defer allocator.free(fh_path);
+        std.fs.cwd().writeFile(.{ .sub_path = fh_path, .data = fetch_head.items }) catch {};
+    }
 }

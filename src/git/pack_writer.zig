@@ -172,9 +172,15 @@ fn savePackInternal(allocator: std.mem.Allocator, git_dir: []const u8, pack_byte
     var pack_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pack_path = std.fmt.bufPrint(&pack_path_buf, "{s}/pack-{s}.pack", .{ pack_dir, checksum_hex }) catch return error.PathTooLong;
 
-    const file = try std.fs.cwd().createFile(pack_path, .{});
-    defer file.close();
-    try file.writeAll(pack_bytes);
+    // Check if the pack already exists (git creates pack files with 444 permissions,
+    // so createFile would fail with AccessDenied trying to truncate a read-only file)
+    std.fs.cwd().access(pack_path, .{}) catch {
+        // File doesn't exist — create and write it
+        const file = try std.fs.cwd().createFile(pack_path, .{});
+        defer file.close();
+        try file.writeAll(pack_bytes);
+    };
+    // If file already exists, it has the same checksum so contents are identical — skip writing
 
     return checksum_hex;
 }

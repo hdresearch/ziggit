@@ -473,7 +473,7 @@ fn closeStdin(process: *std.process.Child) !void {
     }
 }
 
-const max_ssh_response = 256 * 1024 * 1024; // 256MB
+const max_ssh_response = 4 * 1024 * 1024 * 1024; // 4GB
 
 fn readAllFromPipe(allocator: std.mem.Allocator, process: *std.process.Child) ![]u8 {
     if (process.stdout) |*stdout| {

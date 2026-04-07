@@ -19,6 +19,12 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-linux
             artifact: ziggit-linux-aarch64
+          - os: ubuntu-latest
+            target: x86_64-linux-musl
+            artifact: ziggit-linux-x86_64-musl
+          - os: ubuntu-latest
+            target: aarch64-linux-musl
+            artifact: ziggit-linux-aarch64-musl
           - os: macos-latest
             target: aarch64-macos
             artifact: ziggit-macos-aarch64

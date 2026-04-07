@@ -47,6 +47,20 @@ chmod +x ziggit
 sudo mv ziggit /usr/local/bin/
 ```
 
+**Alpine / musl (x86_64):**
+```bash
+curl -fsSL https://github.com/hdresearch/ziggit/releases/latest/download/ziggit-linux-x86_64-musl -o ziggit
+chmod +x ziggit
+sudo mv ziggit /usr/local/bin/
+```
+
+**Alpine / musl (arm64):**
+```bash
+curl -fsSL https://github.com/hdresearch/ziggit/releases/latest/download/ziggit-linux-aarch64-musl -o ziggit
+chmod +x ziggit
+sudo mv ziggit /usr/local/bin/
+```
+
 ### Build from source
 
 Requires [Zig 0.15.2+](https://ziglang.org/download/).

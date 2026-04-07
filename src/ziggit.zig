@@ -1497,9 +1497,12 @@ pub const Repository = struct {
                 defer self.allocator.free(idx_data);
                 const ip = try pack_writer.idxPath(self.allocator, self.git_dir, checksum_hex);
                 defer self.allocator.free(ip);
-                const idx_file = try std.fs.cwd().createFile(ip, .{});
-                defer idx_file.close();
-                try idx_file.writeAll(idx_data);
+                // Only write idx if it doesn't already exist (avoid AccessDenied on read-only pack files)
+                std.fs.cwd().access(ip, .{}) catch {
+                    const idx_file = try std.fs.cwd().createFile(ip, .{});
+                    defer idx_file.close();
+                    try idx_file.writeAll(idx_data);
+                };
 
                 // Invalidate pack cache so next operation picks up the new pack
                 if (self._cached_pack_mmap) |old| {
@@ -1579,9 +1582,12 @@ pub const Repository = struct {
                 defer self.allocator.free(idx_data);
                 const ip = try pack_writer.idxPath(self.allocator, self.git_dir, checksum_hex);
                 defer self.allocator.free(ip);
-                const idx_file = try std.fs.cwd().createFile(ip, .{});
-                defer idx_file.close();
-                try idx_file.writeAll(idx_data);
+                // Only write idx if it doesn't already exist (avoid AccessDenied on read-only pack files)
+                std.fs.cwd().access(ip, .{}) catch {
+                    const idx_file = try std.fs.cwd().createFile(ip, .{});
+                    defer idx_file.close();
+                    try idx_file.writeAll(idx_data);
+                };
 
                 // Re-warm pack cache
                 if (self._cached_pack_mmap) |old| { std.posix.munmap(old); self._cached_pack_mmap = null; }
@@ -1642,13 +1648,13 @@ pub const Repository = struct {
             var iter = dir.iterate();
             while (try iter.next()) |entry| {
                 if (entry.kind != .file) continue;
-                found_remote_refs = true;
                 var ref_path_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const ref_path = std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ remote_refs_dir, entry.name }) catch continue;
                 const content = std.fs.cwd().readFileAlloc(self.allocator, ref_path, 1024) catch continue;
                 defer self.allocator.free(content);
                 const trimmed = std.mem.trim(u8, content, " \t\n\r");
                 if (trimmed.len == 40) {
+                    found_remote_refs = true;
                     const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{entry.name});
                     try list.append(.{
                         .hash = trimmed[0..40].*,
@@ -1682,8 +1688,11 @@ pub const Repository = struct {
                     }
                 }
             } else |_| {}
+        }
 
-            // Also scan packed-refs
+        // Always scan packed-refs to supplement loose refs (refs may be packed
+        // even when refs/remotes/origin/ dir exists with only symrefs like HEAD)
+        {
             var packed_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const packed_path = std.fmt.bufPrint(&packed_path_buf, "{s}/packed-refs", .{self.git_dir}) catch return;
             if (std.fs.cwd().readFileAlloc(self.allocator, packed_path, 4 * 1024 * 1024)) |packed_data| {
@@ -1693,16 +1702,30 @@ pub const Repository = struct {
                     if (line.len == 0 or line[0] == '#' or line[0] == '^') continue;
                     if (line.len > 41 and line[40] == ' ') {
                         const ref_name_raw = line[41..];
-                        if (std.mem.startsWith(u8, ref_name_raw, "refs/heads/")) {
+                        // Include both refs/heads/ and refs/remotes/ from packed-refs
+                        const is_relevant = std.mem.startsWith(u8, ref_name_raw, "refs/heads/") or
+                            std.mem.startsWith(u8, ref_name_raw, "refs/remotes/");
+                        if (is_relevant) {
+                            // Map remote tracking refs to refs/heads/ format for have negotiation
+                            const mapped_name = if (std.mem.startsWith(u8, ref_name_raw, "refs/remotes/origin/"))
+                                ref_name_raw["refs/remotes/origin/".len..]
+                            else if (std.mem.startsWith(u8, ref_name_raw, "refs/heads/"))
+                                ref_name_raw["refs/heads/".len..]
+                            else
+                                continue;
+
+                            const ref_name = try std.fmt.allocPrint(self.allocator, "refs/heads/{s}", .{mapped_name});
+
                             var already_found = false;
                             for (list.items) |lr| {
-                                if (std.mem.eql(u8, lr.name, ref_name_raw)) {
+                                if (std.mem.eql(u8, lr.name, ref_name)) {
                                     already_found = true;
                                     break;
                                 }
                             }
-                            if (!already_found) {
-                                const ref_name = try self.allocator.dupe(u8, ref_name_raw);
+                            if (already_found) {
+                                self.allocator.free(ref_name);
+                            } else {
                                 try list.append(.{
                                     .hash = line[0..40].*,
                                     .name = ref_name,

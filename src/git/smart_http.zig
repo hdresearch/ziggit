@@ -225,7 +225,7 @@ pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []co
 // HTTP helpers
 // ============================================================================
 
-const max_response_size = 256 * 1024 * 1024; // 256MB
+const max_response_size = 4 * 1024 * 1024 * 1024; // 4GB
 
 /// Authentication info extracted from URL or environment
 const AuthInfo = struct {
