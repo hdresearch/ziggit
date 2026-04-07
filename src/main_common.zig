@@ -40,6 +40,7 @@ const cmd_fsck = @import("cmd_fsck.zig");
 const cmd_gc = @import("cmd_gc.zig");
 const cmd_hash_object = @import("cmd_hash_object.zig");
 const cmd_init = @import("cmd_init.zig");
+const cmd_init_agent = @import("cmd_init_agent.zig");
 const cmd_last_modified = @import("cmd_last_modified.zig");
 const cmd_log = @import("cmd_log.zig");
 const cmd_shortlog = @import("cmd_shortlog.zig");
@@ -840,6 +841,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
     // against crashes when no git directory exists (e.g. `git init`, `git --version`).
     const skip_preconfig = std.mem.eql(u8, command, "init") or
         std.mem.eql(u8, command, "init-db") or
+        std.mem.eql(u8, command, "init-agent") or
         std.mem.eql(u8, command, "clone") or
         std.mem.eql(u8, command, "--version") or
         std.mem.eql(u8, command, "-v") or
@@ -863,6 +865,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
             if (std.mem.eql(u8, ga, "--bare")) global_bare = true;
         }
         try cmd_init.cmdInit(allocator, &args_iter, &platform_impl, global_bare);
+    } else if (std.mem.eql(u8, command, "init-agent")) {
+        try cmd_init_agent.cmdInitAgent(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "status")) {
         const status_alloc = if (comptime @import("builtin").target.os.tag != .freestanding and @import("builtin").target.os.tag != .wasi) std.heap.c_allocator else allocator;
         try cmd_status.cmdStatus(status_alloc, &args_iter, &platform_impl, all_original_args.items);

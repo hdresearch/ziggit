@@ -222,9 +222,8 @@ const NATIVE_COMMANDS = [_][]const u8{
     "grep", "notes", "format-patch", "whatchanged", "for-each-repo", "bugreport", "diagnose",
     "web--browse", "fast-import", "fast-export", "pack-refs",
     "shortlog", "credential",
-    "restart", "start", "progress",
-};
-
+    "restart", "start", "progress", "init-agent",
+    };
 
 pub fn isNativeCommand(command: []const u8) bool {
     if (std.mem.startsWith(u8, command, "--list-cmds=")) return true;
