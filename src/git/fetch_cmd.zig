@@ -988,6 +988,7 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         ssh_transport.isSshUrl(remote_url);
 
     if (is_network) {
+        const push_cmd = @import("push_cmd.zig");
         const ziggit = @import("../ziggit.zig");
         const is_bare_repo = !std.mem.endsWith(u8, git_path, "/.git");
         const repo_path = if (is_bare_repo) git_path else (std.fs.path.dirname(git_path) orelse ".");
@@ -998,15 +999,58 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             std.process.exit(128);
         };
         defer repo.close();
-        repo.fetch(remote_url) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}': {}\n", .{ remote_url, err });
-            defer allocator.free(msg);
-            try platform_impl.writeStderr(msg);
-            std.process.exit(128);
+
+        // Try primary URL, fall back to alternate protocol on failure
+        var fetch_succeeded = false;
+        var used_alt_url = false;
+        var alt_url_buf: ?[]u8 = null;
+        defer if (alt_url_buf) |u| allocator.free(u);
+
+        repo.fetch(remote_url) catch {
+            // Primary failed — try alternate protocol
+            const alt_url = if (std.mem.startsWith(u8, remote_url, "http://") or std.mem.startsWith(u8, remote_url, "https://"))
+                push_cmd.httpsToSsh(allocator, remote_url)
+            else
+                push_cmd.sshToHttps(allocator, remote_url);
+
+            if (alt_url) |alt| {
+                alt_url_buf = alt;
+                if (!quiet) {
+                    const hint = try std.fmt.allocPrint(allocator, "hint: fetch failed, trying alternate URL: {s}\n", .{alt});
+                    defer allocator.free(hint);
+                    try platform_impl.writeStderr(hint);
+                }
+                repo.fetch(alt) catch {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}' (also tried {s})\n", .{ remote_url, alt });
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                };
+                used_alt_url = true;
+                fetch_succeeded = true;
+            } else {
+                const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
+                defer allocator.free(emsg);
+                try platform_impl.writeStderr(emsg);
+                std.process.exit(128);
+            }
         };
+        if (!used_alt_url) fetch_succeeded = true;
+
+        // If fallback URL worked, update the remote config
+        if (used_alt_url) {
+            if (alt_url_buf) |alt| {
+                if (!quiet) {
+                    const hint = try std.fmt.allocPrint(allocator, "hint: updating remote '{s}' to {s}\n", .{ remote_name, alt });
+                    defer allocator.free(hint);
+                    try platform_impl.writeStderr(hint);
+                }
+                push_cmd.updateRemoteUrl(allocator, git_path, remote_name, alt);
+            }
+        }
 
         // Succinct mode: show fetch success
-        if (succinct_mod.isEnabled() and !quiet) {
+        if (fetch_succeeded and succinct_mod.isEnabled() and !quiet) {
             const msg = try std.fmt.allocPrint(allocator, "ok fetch {s} refs\n", .{remote_name});
             defer allocator.free(msg);
             try platform_impl.writeStdout(msg);
@@ -2497,6 +2541,7 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             ssh_transport_pull.isSshUrl(actual_url);
 
         if (is_network_pull) {
+            const push_cmd = @import("push_cmd.zig");
             const ziggit = @import("../ziggit.zig");
             const is_bare_repo = !std.mem.endsWith(u8, git_path, "/.git");
             const repo_path = if (is_bare_repo) git_path else (std.fs.path.dirname(git_path) orelse ".");
@@ -2507,12 +2552,49 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 std.process.exit(128);
             };
             defer repo.close();
-            repo.fetch(remote_url) catch |err| {
-                const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}': {}\n", .{ remote_url, err });
-                defer allocator.free(emsg);
-                try platform_impl.writeStderr(emsg);
-                std.process.exit(128);
+
+            var pull_used_alt = false;
+            var pull_alt_buf: ?[]u8 = null;
+            defer if (pull_alt_buf) |u| allocator.free(u);
+
+            repo.fetch(remote_url) catch {
+                const alt = if (std.mem.startsWith(u8, remote_url, "http://") or std.mem.startsWith(u8, remote_url, "https://"))
+                    push_cmd.httpsToSsh(allocator, remote_url)
+                else
+                    push_cmd.sshToHttps(allocator, remote_url);
+
+                if (alt) |a| {
+                    pull_alt_buf = a;
+                    if (!quiet) {
+                        const hint = try std.fmt.allocPrint(allocator, "hint: fetch failed, trying alternate URL: {s}\n", .{a});
+                        defer allocator.free(hint);
+                        try platform_impl.writeStderr(hint);
+                    }
+                    repo.fetch(a) catch {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}' (also tried {s})\n", .{ remote_url, a });
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                    };
+                    pull_used_alt = true;
+                } else {
+                    const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
+                    defer allocator.free(emsg);
+                    try platform_impl.writeStderr(emsg);
+                    std.process.exit(128);
+                }
             };
+
+            if (pull_used_alt) {
+                if (pull_alt_buf) |a| {
+                    if (!quiet) {
+                        const hint = try std.fmt.allocPrint(allocator, "hint: updating remote '{s}' to {s}\n", .{ remote, a });
+                        defer allocator.free(hint);
+                        try platform_impl.writeStderr(hint);
+                    }
+                    push_cmd.updateRemoteUrl(allocator, git_path, remote, a);
+                }
+            }
 
             // Write FETCH_HEAD so the merge step below can find the merge target.
             // Repository.fetch() updates tracking refs but doesn't write FETCH_HEAD.

@@ -12,7 +12,7 @@ const ssh_transport = @import("ssh_transport.zig");
 /// Convert an SSH URL to HTTPS.
 /// git@github.com:org/repo.git → https://github.com/org/repo.git
 /// ssh://git@github.com/org/repo.git → https://github.com/org/repo.git
-fn sshToHttps(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
+pub fn sshToHttps(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     // ssh://[user@]host/path
     if (std.mem.startsWith(u8, url, "ssh://")) {
         const rest = url["ssh://".len..];
@@ -35,7 +35,7 @@ fn sshToHttps(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
 /// Convert an HTTPS URL to SSH (SCP-style).
 /// https://github.com/org/repo.git → git@github.com:org/repo.git
 /// https://TOKEN@github.com/org/repo.git → git@github.com:org/repo.git
-fn httpsToSsh(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
+pub fn httpsToSsh(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     const prefix = if (std.mem.startsWith(u8, url, "https://"))
         url["https://".len..]
     else if (std.mem.startsWith(u8, url, "http://"))
@@ -56,7 +56,7 @@ fn httpsToSsh(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
 }
 
 /// Update the remote URL in .git/config.
-fn updateRemoteUrl(allocator: std.mem.Allocator, git_path: []const u8, remote_name: []const u8, new_url: []const u8) void {
+pub fn updateRemoteUrl(allocator: std.mem.Allocator, git_path: []const u8, remote_name: []const u8, new_url: []const u8) void {
     const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
     defer allocator.free(config_path);
     const content = readFileContent(allocator, config_path) catch return;

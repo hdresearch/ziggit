@@ -24,6 +24,14 @@ const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
+/// Helper: clone bare with optional shallow depth
+fn doCloneBare(ziggit: type, allocator: std.mem.Allocator, clone_url: []const u8, bare_target: []const u8, clone_depth: u32) !ziggit.Repository {
+    return if (clone_depth > 0)
+        try ziggit.Repository.cloneBareShallow(allocator, clone_url, bare_target, clone_depth)
+    else
+        try ziggit.Repository.cloneBare(allocator, clone_url, bare_target);
+}
+
 pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, _: [][]const u8) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
         try platform_impl.writeStderr("clone: not supported in freestanding mode\n");
@@ -476,22 +484,41 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         };
 
         // Clone bare into .git subdirectory (with optional shallow depth)
-        var repo = if (clone_depth > 0)
-            ziggit.Repository.cloneBareShallow(allocator, url.?, bare_target, clone_depth) catch |err| {
+        // Try primary URL first, fall back to alternate protocol on failure
+        const push_cmd = @import("git/push_cmd.zig");
+        var clone_alt_buf: ?[]u8 = null;
+        defer if (clone_alt_buf) |u| allocator.free(u);
+
+        var repo = doCloneBare(ziggit, allocator, url.?, bare_target, clone_depth) catch |primary_err| blk: {
+            // Primary failed — try alternate protocol
+            const alt = if (std.mem.startsWith(u8, url.?, "http://") or std.mem.startsWith(u8, url.?, "https://"))
+                push_cmd.httpsToSsh(allocator, url.?)
+            else
+                push_cmd.sshToHttps(allocator, url.?);
+
+            if (alt) |a| {
+                clone_alt_buf = a;
+                const hint = std.fmt.allocPrint(allocator, "hint: clone failed, trying alternate URL: {s}\n", .{a}) catch "";
+                defer if (hint.len > 0) allocator.free(hint);
+                platform_impl.writeStderr(hint) catch {};
+                // Clean up failed attempt and retry
+                std.fs.cwd().deleteTree(bare_target) catch {};
+                std.fs.cwd().makePath(bare_target) catch {};
+                break :blk doCloneBare(ziggit, allocator, a, bare_target, clone_depth) catch {
+                    std.fs.cwd().deleteTree(final_target_dir) catch {};
+                    const emsg = std.fmt.allocPrint(allocator, "fatal: could not clone from '{s}' or '{s}'\n", .{ url.?, a }) catch "";
+                    defer if (emsg.len > 0) allocator.free(emsg);
+                    platform_impl.writeStderr(emsg) catch {};
+                    std.process.exit(128);
+                };
+            } else {
                 std.fs.cwd().deleteTree(final_target_dir) catch {};
-                const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
-                defer allocator.free(emsg);
-                try platform_impl.writeStderr(emsg);
+                const emsg = std.fmt.allocPrint(allocator, "fatal: {}\n", .{primary_err}) catch "";
+                defer if (emsg.len > 0) allocator.free(emsg);
+                platform_impl.writeStderr(emsg) catch {};
                 std.process.exit(128);
             }
-        else
-            ziggit.Repository.cloneBare(allocator, url.?, bare_target) catch |err| {
-                std.fs.cwd().deleteTree(final_target_dir) catch {};
-                const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
-                defer allocator.free(emsg);
-                try platform_impl.writeStderr(emsg);
-                std.process.exit(128);
-            };
+        };
         repo.close();
 
         // helpers.Convert bare repo to non-bare: update config to set bare = false
