@@ -190,7 +190,7 @@ pub const Repository = struct {
         // Create HEAD file
         const head_file = try std.fmt.allocPrint(self.allocator, "{s}/HEAD", .{git_dir});
         defer self.allocator.free(head_file);
-        try self.plat.fs.writeFile(head_file, "ref: refs/heads/master\n");
+        try self.plat.fs.writeFile(head_file, "ref: refs/heads/main\n");
         
         // Create basic config file
         const config_file = try std.fmt.allocPrint(self.allocator, "{s}/config", .{git_dir});

@@ -387,7 +387,7 @@ fn createGitDirectory(git_dir: []const u8, platform_impl: anytype) !void {
     // Create basic files
     const head_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/HEAD", .{git_dir});
     defer std.heap.page_allocator.free(head_path);
-    try platform_impl.fs.writeFile(head_path, "ref: refs/heads/master\n");
+    try platform_impl.fs.writeFile(head_path, "ref: refs/heads/main\n");
     
     const config_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/config", .{git_dir});
     defer std.heap.page_allocator.free(config_path);

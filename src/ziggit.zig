@@ -1793,6 +1793,18 @@ pub const Repository = struct {
         };
     }
 
+    /// Extract the default branch from server capabilities (symref=HEAD:refs/heads/...).
+    /// Falls back to "refs/heads/main" if not found.
+    fn defaultBranchFromCapabilities(capabilities: []const u8) []const u8 {
+        if (std.mem.indexOf(u8, capabilities, "symref=HEAD:")) |si| {
+            const rest = capabilities[si + "symref=HEAD:".len ..];
+            const end = std.mem.indexOfAny(u8, rest, " \t\n\x00") orelse rest.len;
+            const symref = rest[0..end];
+            if (symref.len > 0) return symref;
+        }
+        return "refs/heads/main";
+    }
+
     /// Clone from SSH URL into a bare repository
     fn cloneBareSsh(allocator: std.mem.Allocator, url: []const u8, target: []const u8) !Repository {
         const ssh_transport = @import("git/ssh_transport.zig");
@@ -1823,7 +1835,7 @@ pub const Repository = struct {
         {
             const f = try std.fs.cwd().createFile(head_path, .{});
             defer f.close();
-            try f.writeAll("ref: refs/heads/master\n");
+            try f.writeAll("ref: refs/heads/main\n");
         }
 
         // Write config for bare repo
@@ -1882,7 +1894,7 @@ pub const Repository = struct {
 
         // Update HEAD to point to the right branch
         if (head_ref) |head_hash| {
-            var head_target: []const u8 = "refs/heads/master";
+            var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
                     std.mem.eql(u8, &ref.hash, head_hash))
@@ -1942,7 +1954,7 @@ pub const Repository = struct {
         {
             const f = try std.fs.cwd().createFile(head_path, .{});
             defer f.close();
-            try f.writeAll("ref: refs/heads/master\n");
+            try f.writeAll("ref: refs/heads/main\n");
         }
 
         // Write config for bare repo
@@ -2012,7 +2024,7 @@ pub const Repository = struct {
         // Find which branch HEAD points to
         if (head_ref) |head_hash| {
             // Check if any branch matches HEAD's hash
-            var head_target: []const u8 = "refs/heads/master";
+            var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
                     std.mem.eql(u8, &ref.hash, head_hash))
@@ -2081,7 +2093,7 @@ pub const Repository = struct {
             const hp = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch return error.PathTooLong;
             const f = try std.fs.cwd().createFile(hp, .{});
             defer f.close();
-            try f.writeAll("ref: refs/heads/master\n");
+            try f.writeAll("ref: refs/heads/main\n");
         }
 
         // Write config for bare repo using stack buffer path
@@ -2194,7 +2206,7 @@ pub const Repository = struct {
 
         // Update HEAD to point to the right branch
         if (head_ref) |head_hash| {
-            var head_target: []const u8 = "refs/heads/master";
+            var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
                     std.mem.eql(u8, &ref.hash, head_hash))
@@ -2261,7 +2273,7 @@ pub const Repository = struct {
         {
             const f = try std.fs.cwd().createFile(head_path, .{});
             defer f.close();
-            try f.writeAll("ref: refs/heads/master\n");
+            try f.writeAll("ref: refs/heads/main\n");
         }
 
         // Write config
@@ -2312,7 +2324,7 @@ pub const Repository = struct {
 
         // Update HEAD to point to the correct branch
         if (head_ref) |head_hash| {
-            var head_target: []const u8 = "refs/heads/master";
+            var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
                     std.mem.eql(u8, &ref.hash, head_hash))
@@ -2364,7 +2376,7 @@ pub const Repository = struct {
         {
             const f = try std.fs.cwd().createFile(head_path, .{});
             defer f.close();
-            try f.writeAll("ref: refs/heads/master\n");
+            try f.writeAll("ref: refs/heads/main\n");
         }
 
         // Write config
@@ -2414,7 +2426,7 @@ pub const Repository = struct {
         }
 
         if (head_ref) |head_hash| {
-            var head_target: []const u8 = "refs/heads/master";
+            var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
                     std.mem.eql(u8, &ref.hash, head_hash))

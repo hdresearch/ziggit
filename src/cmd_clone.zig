@@ -664,8 +664,8 @@ pub fn performLocalClone(
     // helpers.Read source helpers.HEAD to determine default branch
     const src_head_path = try std.fmt.allocPrint(allocator, "{s}/HEAD", .{src_git_dir});
     defer allocator.free(src_head_path);
-    const src_head_content = std.fs.cwd().readFileAlloc(allocator, src_head_path, 4096) catch "ref: refs/heads/master\n";
-    defer if (src_head_content.ptr != @as([*]const u8, "ref: refs/heads/master\n")) allocator.free(src_head_content);
+    const src_head_content = std.fs.cwd().readFileAlloc(allocator, src_head_path, 4096) catch "ref: refs/heads/main\n";
+    defer if (src_head_content.ptr != @as([*]const u8, "ref: refs/heads/main\n")) allocator.free(src_head_content);
 
     const src_head_trimmed = std.mem.trim(u8, src_head_content, " \t\r\n");
 
@@ -927,7 +927,7 @@ pub fn performLocalClone(
             {
                 const f = try std.fs.cwd().createFile(dst_head, .{});
                 defer f.close();
-                try f.writeAll("ref: refs/heads/master\n");
+                try f.writeAll("ref: refs/heads/main\n");
             }
             try platform_impl.writeStderr("warning: helpers.You appear to have cloned an empty repository.\n");
         }
