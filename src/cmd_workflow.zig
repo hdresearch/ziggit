@@ -273,6 +273,88 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
     printErr(allocator, "ok committed+pushed ({s})\n", .{default_branch});
 }
 
+/// setup <repo_url> [<path>] [--name <name>] [--email <email>]
+///
+/// One-command repo bootstrap for agent VMs. Does:
+///   1. Clone the repo to <path> (default: /root/repo)
+///   2. cd into it
+///   3. Configure git user.name and user.email
+///   4. Print REPO_READY on success
+///
+/// This replaces the multi-step clone + config dance that agents often fumble.
+/// Auth is handled automatically by ziggit's httpsWithToken.
+pub fn cmdSetup(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIterator) !void {
+    var repo_url: ?[]const u8 = null;
+    var path: []const u8 = "/root/repo";
+    var name: []const u8 = "agent";
+    var email: []const u8 = "agent@zagent";
+
+    // Parse args: setup <url> [path] [--name N] [--email E]
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--name")) {
+            name = args_iter.next() orelse {
+                printErr(allocator, "error: --name requires a value\n", .{});
+                return error.SubcommandFailed;
+            };
+        } else if (std.mem.eql(u8, arg, "--email")) {
+            email = args_iter.next() orelse {
+                printErr(allocator, "error: --email requires a value\n", .{});
+                return error.SubcommandFailed;
+            };
+        } else if (repo_url == null) {
+            repo_url = arg;
+        } else {
+            path = arg;
+        }
+    }
+
+    const url = repo_url orelse {
+        printErr(allocator, "error: setup requires a repo URL\n", .{});
+        printErr(allocator, "usage: ziggit setup <repo_url> [path] [--name N] [--email E]\n", .{});
+        return error.SubcommandFailed;
+    };
+
+    // Step 1: Clone
+    printErr(allocator, "setup: cloning {s} → {s}\n", .{ url, path });
+    runSubcommand(allocator, &.{ "clone", url, path }) catch |e| {
+        printErr(allocator, "FAILED: clone {s}\n", .{url});
+        return e;
+    };
+
+    // Step 2: cd into the repo and configure identity.
+    // We can't actually chdir, but we can run config with -C.
+    // However, ziggit's config doesn't support -C. Instead, we'll
+    // write the config values directly to the git config file.
+    const config_path = std.fmt.allocPrint(allocator, "{s}/.git/config", .{path}) catch return error.OutOfMemory;
+    defer allocator.free(config_path);
+
+    // Append [user] section to .git/config
+    if (std.fs.cwd().openFile(config_path, .{ .mode = .read_write })) |file| {
+        defer file.close();
+        // Seek to end
+        const stat = file.stat() catch {
+            printErr(allocator, "FAILED: stat {s}\n", .{config_path});
+            return error.SubcommandFailed;
+        };
+        file.seekTo(stat.size) catch {
+            printErr(allocator, "FAILED: seek in {s}\n", .{config_path});
+            return error.SubcommandFailed;
+        };
+        const user_section = std.fmt.allocPrint(allocator, "\n[user]\n\tname = {s}\n\temail = {s}\n", .{ name, email }) catch return error.OutOfMemory;
+        defer allocator.free(user_section);
+        file.writeAll(user_section) catch {
+            printErr(allocator, "FAILED: write user config\n", .{});
+            return error.SubcommandFailed;
+        };
+    } else |_| {
+        printErr(allocator, "FAILED: open {s}\n", .{config_path});
+        return error.SubcommandFailed;
+    }
+
+    printErr(allocator, "setup: configured user.name={s} user.email={s}\n", .{ name, email });
+    printErr(allocator, "REPO_READY\n", .{});
+}
+
 /// Push current_branch to origin/default_branch. Returns true on success.
 fn pushBranch(allocator: std.mem.Allocator, current_branch: []const u8, default_branch: []const u8) bool {
     if (std.mem.eql(u8, current_branch, default_branch)) {

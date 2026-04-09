@@ -1271,6 +1271,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         cmd_workflow.cmdStart(allocator, &args_iter) catch std.process.exit(1);
     } else if (std.mem.eql(u8, command, "progress")) {
         cmd_workflow.cmdProgress(allocator, &args_iter) catch std.process.exit(1);
+    } else if (std.mem.eql(u8, command, "setup")) {
+        cmd_workflow.cmdSetup(allocator, &args_iter) catch std.process.exit(1);
     }
 }
 
