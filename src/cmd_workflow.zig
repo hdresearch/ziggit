@@ -196,14 +196,17 @@ pub fn cmdStart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIterat
 
 /// progress "DESCRIPTION" — the ONE command agents use for version control.
 ///
-/// 1. fetch + merge origin (pick up other agents' work)
-/// 2. add -A + commit
+/// 1. add -A + commit (save local work FIRST — merge must not touch it)
+/// 2. fetch + merge origin (pick up other agents' work)
 /// 3. push
 ///
-/// Merge-before-commit means the agent's commit is always on top of the
-/// latest remote state. Merge (not rebase) means no commit SHAs are ever
-/// rewritten, so history is always additive and `reset --hard HEAD~N`
-/// behaves predictably.
+/// CRITICAL: We commit BEFORE merging because ziggit's merge/checkout
+/// deletes working-tree files not in the target tree. If we merged first,
+/// uncommitted local files would be wiped. Commit-first guarantees local
+/// work is safe before any tree manipulation happens.
+///
+/// Merge (not rebase) means no commit SHAs are ever rewritten, so history
+/// is always additive and `reset --hard HEAD~N` behaves predictably.
 ///
 /// If push fails due to a race (another agent pushed between our fetch and
 /// push), we pull-merge and retry once.
@@ -220,8 +223,23 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
     const origin_branch = std.fmt.allocPrint(allocator, "origin/{s}", .{default_branch}) catch return error.OutOfMemory;
     defer allocator.free(origin_branch);
 
-    // Step 1: Fetch + merge to incorporate other agents' work BEFORE committing.
-    // This way our commit sits cleanly on top of the merged state.
+    // Step 1: Stage and commit the agent's work FIRST.
+    // This MUST happen before fetch+merge because merge's checkoutTree
+    // deletes working-tree files not in the target tree — uncommitted
+    // local changes would be destroyed.
+    runSubcommand(allocator, &.{ "add", "-A" }) catch |e| {
+        printErr(allocator, "FAILED: add\n", .{});
+        return e;
+    };
+
+    // commit (may fail with "nothing to commit" — that's OK)
+    runSubcommand(allocator, &.{ "commit", "-m", message }) catch {
+        // Not fatal — might be nothing new to commit
+        printErr(allocator, "note: nothing to commit\n", .{});
+    };
+
+    // Step 2: Fetch + merge to incorporate other agents' work.
+    // Now safe because local changes are committed.
     runSubcommand(allocator, &.{ "fetch", "origin" }) catch |e| {
         printErr(allocator, "FAILED: fetch origin\n", .{});
         return e;
@@ -229,22 +247,17 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
 
     // Merge origin — this is a no-op if already up to date.
     runSubcommand(allocator, &.{ "merge", origin_branch, "--no-edit" }) catch |e| {
-        // Merge conflict — abort and let the agent know
-        printErr(allocator, "FAILED: merge {s} before commit — aborting\n", .{origin_branch});
+        // Merge conflict — abort to leave the tree clean.
+        // The local commit is safe; push what we have.
+        printErr(allocator, "WARN: merge {s} conflict — aborting merge, pushing local commit\n", .{origin_branch});
         runSubcommand(allocator, &.{ "merge", "--abort" }) catch {};
-        return e;
-    };
-
-    // Step 2: Stage and commit the agent's work
-    runSubcommand(allocator, &.{ "add", "-A" }) catch |e| {
-        printErr(allocator, "FAILED: add\n", .{});
-        return e;
-    };
-
-    // commit (may fail with "nothing to commit" if only the merge happened)
-    runSubcommand(allocator, &.{ "commit", "-m", message }) catch {
-        // Not fatal — might be nothing new to commit after the merge
-        printErr(allocator, "note: nothing to commit (merge-only?)\n", .{});
+        // Still try to push the local commit even without the merge
+        if (!pushBranch(allocator, current_branch, default_branch)) {
+            printErr(allocator, "FAILED: push after merge conflict\n", .{});
+            return e;
+        }
+        printErr(allocator, "ok committed+pushed (no merge) ({s})\n", .{default_branch});
+        return;
     };
 
     // Step 3: Push
