@@ -489,9 +489,29 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         var clone_alt_buf: ?[]u8 = null;
         defer if (clone_alt_buf) |u| allocator.free(u);
 
-        var repo = doCloneBare(ziggit, allocator, url.?, bare_target, clone_depth) catch |primary_err| blk: {
-            // Primary failed — try alternate protocol
-            const alt = if (std.mem.startsWith(u8, url.?, "http://") or std.mem.startsWith(u8, url.?, "https://"))
+        var repo = doCloneBare(ziggit, allocator, url.?, bare_target, clone_depth) catch blk: {
+            const clone_is_https = std.mem.startsWith(u8, url.?, "http://") or std.mem.startsWith(u8, url.?, "https://");
+
+            // If HTTPS, try with token first
+            if (clone_is_https) {
+                if (push_cmd.httpsWithToken(allocator, url.?)) |token_url| {
+                    platform_impl.writeStderr("hint: clone failed, retrying with API token...\n") catch {};
+                    std.fs.cwd().deleteTree(bare_target) catch {};
+                    std.fs.cwd().makePath(bare_target) catch {};
+                    if (doCloneBare(ziggit, allocator, token_url, bare_target, clone_depth)) |token_repo| {
+                        // Token-auth worked
+                        clone_alt_buf = token_url;
+                        platform_impl.writeStderr("hint: token-authenticated clone succeeded\n") catch {};
+                        break :blk token_repo;
+                    } else |_| {
+                        allocator.free(token_url);
+                        // Token didn't help — fall through to alternate protocol
+                    }
+                }
+            }
+
+            // Try alternate protocol (HTTPS→SSH or SSH→HTTPS)
+            const alt = if (clone_is_https)
                 push_cmd.httpsToSsh(allocator, url.?)
             else
                 push_cmd.sshToHttps(allocator, url.?);
@@ -501,19 +521,18 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 const hint = std.fmt.allocPrint(allocator, "hint: clone failed, trying alternate URL: {s}\n", .{a}) catch "";
                 defer if (hint.len > 0) allocator.free(hint);
                 platform_impl.writeStderr(hint) catch {};
-                // Clean up failed attempt and retry
                 std.fs.cwd().deleteTree(bare_target) catch {};
                 std.fs.cwd().makePath(bare_target) catch {};
                 break :blk doCloneBare(ziggit, allocator, a, bare_target, clone_depth) catch {
                     std.fs.cwd().deleteTree(final_target_dir) catch {};
-                    const emsg = std.fmt.allocPrint(allocator, "fatal: could not clone from '{s}' or '{s}'\n", .{ url.?, a }) catch "";
+                    const emsg = std.fmt.allocPrint(allocator, "fatal: could not clone from '{s}'\n", .{url.?}) catch "";
                     defer if (emsg.len > 0) allocator.free(emsg);
                     platform_impl.writeStderr(emsg) catch {};
                     std.process.exit(128);
                 };
             } else {
                 std.fs.cwd().deleteTree(final_target_dir) catch {};
-                const emsg = std.fmt.allocPrint(allocator, "fatal: {}\n", .{primary_err}) catch "";
+                const emsg = std.fmt.allocPrint(allocator, "fatal: could not clone '{s}'\n", .{url.?}) catch "";
                 defer if (emsg.len > 0) allocator.free(emsg);
                 platform_impl.writeStderr(emsg) catch {};
                 std.process.exit(128);

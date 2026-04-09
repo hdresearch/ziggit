@@ -55,6 +55,39 @@ pub fn httpsToSsh(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     return std.fmt.allocPrint(allocator, "git@{s}:{s}", .{ host, path }) catch null;
 }
 
+/// Try to inject a GitHub API token into an HTTPS URL.
+/// Checks GITHUB_TOKEN, GITHUB_API_TOKEN, GITHUB_API_KEY, GH_TOKEN env vars.
+/// https://github.com/org/repo.git → https://TOKEN@github.com/org/repo.git
+/// Returns null if the URL isn't HTTPS, already has credentials, or no token is found.
+pub fn httpsWithToken(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
+    const prefix = if (std.mem.startsWith(u8, url, "https://"))
+        @as([]const u8, "https://")
+    else if (std.mem.startsWith(u8, url, "http://"))
+        @as([]const u8, "http://")
+    else
+        return null;
+
+    const after_scheme = url[prefix.len..];
+
+    // Already has credentials embedded — don't double up
+    if (std.mem.indexOf(u8, after_scheme, "@")) |at| {
+        const before_at = after_scheme[0..at];
+        // Only skip if @ comes before the first / (i.e. it's in the host part)
+        if (std.mem.indexOf(u8, before_at, "/") == null) return null;
+    }
+
+    // Try token env vars in priority order
+    const token_vars = [_][]const u8{ "GITHUB_TOKEN", "GITHUB_API_TOKEN", "GITHUB_API_KEY", "GH_TOKEN" };
+    for (token_vars) |var_name| {
+        if (std.posix.getenv(var_name)) |token| {
+            if (token.len > 0) {
+                return std.fmt.allocPrint(allocator, "{s}{s}@{s}", .{ prefix, token, after_scheme }) catch null;
+            }
+        }
+    }
+    return null;
+}
+
 /// Update the remote URL in .git/config.
 pub fn updateRemoteUrl(allocator: std.mem.Allocator, git_path: []const u8, remote_name: []const u8, new_url: []const u8) void {
     const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
@@ -501,34 +534,31 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     else
         remote_url;
 
-    // Network push — try primary transport, fall back to alternate URL format
+    // Network push — try primary transport, fall back to token-auth HTTPS, then SSH
     if (std.mem.startsWith(u8, actual_url, "http://") or std.mem.startsWith(u8, actual_url, "https://")) {
         pushSmartHttp(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err| {
             if (err != error.TransportFailed) return err;
-            // HTTPS failed — try SSH fallback
-            if (httpsToSsh(allocator, actual_url)) |alt_url| {
-                defer allocator.free(alt_url);
+            // HTTPS failed — try with GitHub token if available
+            if (httpsWithToken(allocator, actual_url)) |token_url| {
+                defer allocator.free(token_url);
                 if (!quiet) {
-                    const msg = try std.fmt.allocPrint(allocator, "hint: HTTPS push failed, trying SSH: {s}\n", .{alt_url});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
+                    try platform_impl.writeStderr("hint: HTTPS push failed, retrying with API token...\n");
                 }
-                pushSsh(allocator, git_path, alt_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err2| {
-                    if (err2 != error.TransportFailed) return err2;
-                    try platform_impl.writeStderr("fatal: unable to access remote repository via HTTPS or SSH\n");
-                    std.process.exit(128);
+                pushSmartHttp(allocator, git_path, token_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err_tok| {
+                    if (err_tok != error.TransportFailed) return err_tok;
+                    // Token didn't help — continue to SSH fallback below
+                    return tryPushSshFallback(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
                 };
-                // SSH worked — update the remote URL
+                // Token-auth HTTPS worked — update remote with token URL
                 if (!quiet) {
-                    const msg = try std.fmt.allocPrint(allocator, "hint: SSH push succeeded, updating remote '{s}' to {s}\n", .{ remote, alt_url });
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
+                    try platform_impl.writeStderr("hint: token-authenticated HTTPS push succeeded, updating remote\n");
                 }
-                updateRemoteUrl(allocator, git_path, remote, alt_url);
-            } else {
-                try platform_impl.writeStderr("fatal: unable to access remote repository\n");
-                std.process.exit(128);
+                updateRemoteUrl(allocator, git_path, remote, token_url);
+                if (set_upstream) applySetUpstream(allocator, git_path, remote, platform_impl);
+                return;
             }
+            // No token — try SSH fallback
+            try tryPushSshFallback(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
         };
         if (set_upstream) applySetUpstream(allocator, git_path, remote, platform_impl);
         return;
@@ -537,26 +567,29 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
     if (std.mem.startsWith(u8, actual_url, "ssh://") or ssh_transport.isSshUrl(actual_url)) {
         pushSsh(allocator, git_path, actual_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err| {
             if (err != error.TransportFailed) return err;
-            // SSH failed — try HTTPS fallback
+            // SSH failed — try HTTPS (with token if available, then plain)
             if (sshToHttps(allocator, actual_url)) |alt_url| {
                 defer allocator.free(alt_url);
-                if (!quiet) {
-                    const msg = try std.fmt.allocPrint(allocator, "hint: SSH push failed, trying HTTPS: {s}\n", .{alt_url});
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
+                // Try token-auth HTTPS first
+                if (httpsWithToken(allocator, alt_url)) |token_url| {
+                    defer allocator.free(token_url);
+                    if (!quiet) {
+                        try platform_impl.writeStderr("hint: SSH push failed, trying HTTPS with API token...\n");
+                    }
+                    pushSmartHttp(allocator, git_path, token_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err_tok| {
+                        if (err_tok != error.TransportFailed) return err_tok;
+                        // Token didn't help — try plain HTTPS
+                        return tryPushPlainHttpsFallback(allocator, git_path, alt_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
+                    };
+                    if (!quiet) {
+                        try platform_impl.writeStderr("hint: token-authenticated HTTPS push succeeded, updating remote\n");
+                    }
+                    updateRemoteUrl(allocator, git_path, remote, token_url);
+                    if (set_upstream) applySetUpstream(allocator, git_path, remote, platform_impl);
+                    return;
                 }
-                pushSmartHttp(allocator, git_path, alt_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err2| {
-                    if (err2 != error.TransportFailed) return err2;
-                    try platform_impl.writeStderr("fatal: unable to access remote repository via SSH or HTTPS\n");
-                    std.process.exit(128);
-                };
-                // HTTPS worked — update the remote URL
-                if (!quiet) {
-                    const msg = try std.fmt.allocPrint(allocator, "hint: HTTPS push succeeded, updating remote '{s}' to {s}\n", .{ remote, alt_url });
-                    defer allocator.free(msg);
-                    try platform_impl.writeStderr(msg);
-                }
-                updateRemoteUrl(allocator, git_path, remote, alt_url);
+                // No token — try plain HTTPS
+                try tryPushPlainHttpsFallback(allocator, git_path, alt_url, remote, &refspecs_list, force_push, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl);
             } else {
                 try platform_impl.writeStderr("fatal: unable to access remote repository via SSH\n");
                 std.process.exit(128);
@@ -1476,6 +1509,81 @@ fn pushFollowTags(
         }
     }
     _ = quiet;
+}
+
+/// Set upstream tracking for the current branch after a successful push.
+/// HTTPS failed, no token or token failed — fall back to SSH.
+fn tryPushSshFallback(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    https_url: []const u8,
+    remote: []const u8,
+    refspecs_list: *std.array_list.Managed([]const u8),
+    force: bool,
+    dry_run: bool,
+    quiet: bool,
+    push_all: bool,
+    push_tags: bool,
+    push_mirror: bool,
+    push_delete: bool,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    if (httpsToSsh(allocator, https_url)) |alt_url| {
+        defer allocator.free(alt_url);
+        if (!quiet) {
+            const msg = try std.fmt.allocPrint(allocator, "hint: HTTPS push failed, trying SSH: {s}\n", .{alt_url});
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+        }
+        pushSsh(allocator, git_path, alt_url, remote, refspecs_list, force, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err2| {
+            if (err2 != error.TransportFailed) return err2;
+            try platform_impl.writeStderr("fatal: unable to access remote repository via HTTPS or SSH\n");
+            std.process.exit(128);
+        };
+        if (!quiet) {
+            const msg = try std.fmt.allocPrint(allocator, "hint: SSH push succeeded, updating remote '{s}' to {s}\n", .{ remote, alt_url });
+            defer allocator.free(msg);
+            try platform_impl.writeStderr(msg);
+        }
+        updateRemoteUrl(allocator, git_path, remote, alt_url);
+    } else {
+        try platform_impl.writeStderr("fatal: unable to access remote repository\n");
+        std.process.exit(128);
+    }
+}
+
+/// SSH failed, token failed — fall back to plain HTTPS.
+fn tryPushPlainHttpsFallback(
+    allocator: std.mem.Allocator,
+    git_path: []const u8,
+    https_url: []const u8,
+    remote: []const u8,
+    refspecs_list: *std.array_list.Managed([]const u8),
+    force: bool,
+    dry_run: bool,
+    quiet: bool,
+    push_all: bool,
+    push_tags: bool,
+    push_mirror: bool,
+    push_delete: bool,
+    platform_impl: *const platform_mod.Platform,
+) !void {
+    if (!quiet) {
+        const msg = try std.fmt.allocPrint(allocator, "hint: SSH push failed, trying HTTPS: {s}\n", .{https_url});
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    }
+    pushSmartHttp(allocator, git_path, https_url, remote, refspecs_list, force, dry_run, quiet, push_all, push_tags, push_mirror, push_delete, platform_impl) catch |err2| {
+        if (err2 != error.TransportFailed) return err2;
+        try platform_impl.writeStderr("fatal: unable to access remote repository via SSH or HTTPS\n");
+        std.process.exit(128);
+    };
+    if (!quiet) {
+        const msg = try std.fmt.allocPrint(allocator, "hint: HTTPS push succeeded, updating remote '{s}' to {s}\n", .{ remote, https_url });
+        defer allocator.free(msg);
+        try platform_impl.writeStderr(msg);
+    }
+    updateRemoteUrl(allocator, git_path, remote, https_url);
 }
 
 /// Set upstream tracking for the current branch after a successful push.

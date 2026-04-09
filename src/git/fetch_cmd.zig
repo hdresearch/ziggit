@@ -1000,15 +1000,67 @@ pub fn cmdFetch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
         };
         defer repo.close();
 
-        // Try primary URL, fall back to alternate protocol on failure
+        // Try primary URL; on failure try token-auth HTTPS, then alternate protocol
         var fetch_succeeded = false;
         var used_alt_url = false;
         var alt_url_buf: ?[]u8 = null;
         defer if (alt_url_buf) |u| allocator.free(u);
 
         repo.fetch(remote_url) catch {
-            // Primary failed — try alternate protocol
-            const alt_url = if (std.mem.startsWith(u8, remote_url, "http://") or std.mem.startsWith(u8, remote_url, "https://"))
+            // Primary failed — if HTTPS, try with token first
+            const is_https = std.mem.startsWith(u8, remote_url, "http://") or std.mem.startsWith(u8, remote_url, "https://");
+            if (is_https) {
+                if (push_cmd.httpsWithToken(allocator, remote_url)) |token_url| {
+                    defer allocator.free(token_url);
+                    if (!quiet) {
+                        try platform_impl.writeStderr("hint: fetch failed, retrying with API token...\n");
+                    }
+                    repo.fetch(token_url) catch {
+                        // Token didn't help — fall through to SSH below
+                        const ssh_alt = push_cmd.httpsToSsh(allocator, remote_url);
+                        if (ssh_alt) |alt| {
+                            alt_url_buf = alt;
+                            if (!quiet) {
+                                const hint = try std.fmt.allocPrint(allocator, "hint: token-auth fetch also failed, trying SSH: {s}\n", .{alt});
+                                defer allocator.free(hint);
+                                try platform_impl.writeStderr(hint);
+                            }
+                            repo.fetch(alt) catch {
+                                const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
+                                defer allocator.free(emsg);
+                                try platform_impl.writeStderr(emsg);
+                                std.process.exit(128);
+                            };
+                            used_alt_url = true;
+                            fetch_succeeded = true;
+                            if (!quiet) {
+                                const hint = try std.fmt.allocPrint(allocator, "hint: updating remote '{s}' to {s}\n", .{ remote_name, alt });
+                                defer allocator.free(hint);
+                                try platform_impl.writeStderr(hint);
+                            }
+                            push_cmd.updateRemoteUrl(allocator, git_path, remote_name, alt);
+                            return;
+                        } else {
+                            const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                        }
+                    };
+                    // Token-auth HTTPS worked
+                    alt_url_buf = try allocator.dupe(u8, token_url);
+                    used_alt_url = true;
+                    fetch_succeeded = true;
+                    if (!quiet) {
+                        try platform_impl.writeStderr("hint: token-authenticated fetch succeeded, updating remote\n");
+                    }
+                    push_cmd.updateRemoteUrl(allocator, git_path, remote_name, token_url);
+                    return;
+                }
+            }
+
+            // No token or SSH URL — try alternate protocol
+            const alt_url = if (is_https)
                 push_cmd.httpsToSsh(allocator, remote_url)
             else
                 push_cmd.sshToHttps(allocator, remote_url);
@@ -2558,43 +2610,92 @@ pub fn cmdPull(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
             defer if (pull_alt_buf) |u| allocator.free(u);
 
             repo.fetch(remote_url) catch {
-                const alt = if (std.mem.startsWith(u8, remote_url, "http://") or std.mem.startsWith(u8, remote_url, "https://"))
-                    push_cmd.httpsToSsh(allocator, remote_url)
-                else
-                    push_cmd.sshToHttps(allocator, remote_url);
+                const pull_is_https = std.mem.startsWith(u8, remote_url, "http://") or std.mem.startsWith(u8, remote_url, "https://");
 
-                if (alt) |a| {
-                    pull_alt_buf = a;
-                    if (!quiet) {
-                        const hint = try std.fmt.allocPrint(allocator, "hint: fetch failed, trying alternate URL: {s}\n", .{a});
-                        defer allocator.free(hint);
-                        try platform_impl.writeStderr(hint);
+                // If HTTPS, try with token first
+                if (pull_is_https) {
+                    if (push_cmd.httpsWithToken(allocator, remote_url)) |token_url| {
+                        defer allocator.free(token_url);
+                        if (!quiet) {
+                            try platform_impl.writeStderr("hint: fetch failed, retrying with API token...\n");
+                        }
+                        repo.fetch(token_url) catch {
+                            // Token didn't help — fall through to alternate protocol
+                            const ssh_alt = push_cmd.httpsToSsh(allocator, remote_url);
+                            if (ssh_alt) |a| {
+                                pull_alt_buf = a;
+                                if (!quiet) {
+                                    const hint = try std.fmt.allocPrint(allocator, "hint: token-auth also failed, trying SSH: {s}\n", .{a});
+                                    defer allocator.free(hint);
+                                    try platform_impl.writeStderr(hint);
+                                }
+                                repo.fetch(a) catch {
+                                    const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
+                                    defer allocator.free(emsg);
+                                    try platform_impl.writeStderr(emsg);
+                                    std.process.exit(128);
+                                };
+                                pull_used_alt = true;
+                                if (!quiet) {
+                                    const hint = try std.fmt.allocPrint(allocator, "hint: updating remote '{s}' to {s}\n", .{ remote, a });
+                                    defer allocator.free(hint);
+                                    try platform_impl.writeStderr(hint);
+                                }
+                                push_cmd.updateRemoteUrl(allocator, git_path, remote, a);
+                            } else {
+                                const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
+                                defer allocator.free(emsg);
+                                try platform_impl.writeStderr(emsg);
+                                std.process.exit(128);
+                            }
+                        };
+                        if (!pull_used_alt) {
+                            // Token-auth HTTPS worked
+                            pull_alt_buf = allocator.dupe(u8, token_url) catch null;
+                            pull_used_alt = true;
+                            if (!quiet) {
+                                try platform_impl.writeStderr("hint: token-authenticated fetch succeeded, updating remote\n");
+                            }
+                            push_cmd.updateRemoteUrl(allocator, git_path, remote, token_url);
+                        }
                     }
-                    repo.fetch(a) catch {
-                        const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}' (also tried {s})\n", .{ remote_url, a });
+                }
+
+                // If token path didn't resolve it, try alternate protocol
+                if (!pull_used_alt) {
+                    const alt = if (pull_is_https)
+                        push_cmd.httpsToSsh(allocator, remote_url)
+                    else
+                        push_cmd.sshToHttps(allocator, remote_url);
+
+                    if (alt) |a| {
+                        pull_alt_buf = a;
+                        if (!quiet) {
+                            const hint = try std.fmt.allocPrint(allocator, "hint: fetch failed, trying alternate URL: {s}\n", .{a});
+                            defer allocator.free(hint);
+                            try platform_impl.writeStderr(hint);
+                        }
+                        repo.fetch(a) catch {
+                            const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}' (also tried {s})\n", .{ remote_url, a });
+                            defer allocator.free(emsg);
+                            try platform_impl.writeStderr(emsg);
+                            std.process.exit(128);
+                        };
+                        pull_used_alt = true;
+                        if (!quiet) {
+                            const hint = try std.fmt.allocPrint(allocator, "hint: updating remote '{s}' to {s}\n", .{ remote, a });
+                            defer allocator.free(hint);
+                            try platform_impl.writeStderr(hint);
+                        }
+                        push_cmd.updateRemoteUrl(allocator, git_path, remote, a);
+                    } else {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
                         defer allocator.free(emsg);
                         try platform_impl.writeStderr(emsg);
                         std.process.exit(128);
-                    };
-                    pull_used_alt = true;
-                } else {
-                    const emsg = try std.fmt.allocPrint(allocator, "fatal: could not fetch from '{s}'\n", .{remote_url});
-                    defer allocator.free(emsg);
-                    try platform_impl.writeStderr(emsg);
-                    std.process.exit(128);
+                    }
                 }
             };
-
-            if (pull_used_alt) {
-                if (pull_alt_buf) |a| {
-                    if (!quiet) {
-                        const hint = try std.fmt.allocPrint(allocator, "hint: updating remote '{s}' to {s}\n", .{ remote, a });
-                        defer allocator.free(hint);
-                        try platform_impl.writeStderr(hint);
-                    }
-                    push_cmd.updateRemoteUrl(allocator, git_path, remote, a);
-                }
-            }
 
             // Write FETCH_HEAD so the merge step below can find the merge target.
             // Repository.fetch() updates tracking refs but doesn't write FETCH_HEAD.
