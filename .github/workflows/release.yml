@@ -133,6 +133,7 @@ jobs:
 
       - name: Write formula
         run: |
+          mkdir -p homebrew-tap/Formula
           cat > homebrew-tap/Formula/ziggit.rb << 'FORMULA'
           class Ziggit < Formula
             desc "A modern git implementation written in pure Zig — 4-10× faster, 142KB WASM, succinct mode for LLMs"
