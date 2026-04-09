@@ -530,6 +530,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 std.process.exit(128);
             }
         };
+        if (set_upstream) applySetUpstream(allocator, git_path, remote, platform_impl);
         return;
     }
 
@@ -561,6 +562,7 @@ pub fn cmdPush(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, pl
                 std.process.exit(128);
             }
         };
+        if (set_upstream) applySetUpstream(allocator, git_path, remote, platform_impl);
         return;
     }
 
@@ -1474,6 +1476,16 @@ fn pushFollowTags(
         }
     }
     _ = quiet;
+}
+
+/// Set upstream tracking for the current branch after a successful push.
+fn applySetUpstream(allocator: std.mem.Allocator, git_path: []const u8, remote: []const u8, platform_impl: *const platform_mod.Platform) void {
+    if (refs.getCurrentBranch(git_path, platform_impl, allocator)) |branch| {
+        defer allocator.free(branch);
+        const config_path = std.fmt.allocPrint(allocator, "{s}/config", .{git_path}) catch return;
+        defer allocator.free(config_path);
+        setUpstreamConfig(allocator, config_path, branch, remote);
+    } else |_| {}
 }
 
 fn setUpstreamConfig(allocator: std.mem.Allocator, config_path: []const u8, branch: []const u8, remote: []const u8) void {
