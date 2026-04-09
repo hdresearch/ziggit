@@ -11,7 +11,7 @@ pub fn cmdInitAgent(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIt
         \\**Drop-in replacement for `git`.** Use `ziggit` exactly like `git` for all operations.
         \\
         \\## Notice for AI Agents
-        \\- **Succinct Mode:** Output is heavily compressed by default to save tokens. If you need standard verbose output to understand a complex state, use `ziggit --no-succinct <cmd>`.
+        \\- **Succinct Mode:** Output is heavily compressed by default to save tokens. If you need standard verbose output to understand a complex state, use `GIT_SUCCINCT=0 GIT_TRACE=1 ZIGGIT_TRACE_TIMING=1 ziggit <cmd>`.
         \\
         \\## Workflow Commands
         \\Convenient aliases for development loops:
