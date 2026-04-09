@@ -1870,10 +1870,10 @@ pub const Repository = struct {
         }
 
         // Write refs
-        var head_ref: ?[]const u8 = null;
+        var head_ref: ?[40]u8 = null;
         for (clone_result.refs) |ref| {
             if (std.mem.eql(u8, ref.name, "HEAD")) {
-                head_ref = &ref.hash;
+                head_ref = ref.hash;
                 continue;
             }
 
@@ -1897,7 +1897,7 @@ pub const Repository = struct {
             var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
-                    std.mem.eql(u8, &ref.hash, head_hash))
+                    std.mem.eql(u8, &ref.hash, &head_hash))
                 {
                     head_target = ref.name;
                     break;
@@ -1992,7 +1992,7 @@ pub const Repository = struct {
         }
 
         // Write refs using packed-refs file (single file instead of thousands of individual files)
-        var head_ref: ?[]const u8 = null;
+        var head_ref: ?[40]u8 = null;
         {
             const packed_refs_path = std.fmt.bufPrint(&path_buf, "{s}/packed-refs", .{target}) catch return error.PathTooLong;
             var packed_refs = std.array_list.Managed(u8).init(allocator);
@@ -2001,7 +2001,7 @@ pub const Repository = struct {
 
             for (clone_result.refs) |ref| {
                 if (std.mem.eql(u8, ref.name, "HEAD")) {
-                    head_ref = &ref.hash;
+                    head_ref = ref.hash;
                     continue;
                 }
                 // Only write relevant refs (branches + tags), skip PR refs
@@ -2023,17 +2023,18 @@ pub const Repository = struct {
         // Update HEAD to point to the right branch
         // Find which branch HEAD points to
         if (head_ref) |head_hash| {
-            // Check if any branch matches HEAD's hash
             var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
-                    std.mem.eql(u8, &ref.hash, head_hash))
+                    std.mem.eql(u8, &ref.hash, &head_hash))
                 {
                     head_target = ref.name;
                     break;
                 }
             }
-            const hf = try std.fs.cwd().createFile(head_path, .{});
+            // Re-compute HEAD path (path_buf was reused for packed-refs above)
+            const hp = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch return error.PathTooLong;
+            const hf = try std.fs.cwd().createFile(hp, .{});
             defer hf.close();
             { var buf_: [512]u8 = undefined; const msg_ = std.fmt.bufPrint(&buf_, "ref: {s}\n", .{head_target}) catch unreachable; try hf.writeAll(msg_); }
         }
@@ -2167,7 +2168,7 @@ pub const Repository = struct {
 
         // Write refs using packed-refs file
         // For shallow clones, only write branch refs (not tags, which point to missing objects)
-        var head_ref: ?[]const u8 = null;
+        var head_ref: ?[40]u8 = null;
         {
             const pp = std.fmt.bufPrint(&path_buf, "{s}/packed-refs", .{target}) catch return error.PathTooLong;
             var packed_refs = std.array_list.Managed(u8).init(allocator);
@@ -2178,7 +2179,7 @@ pub const Repository = struct {
             var head_hash_oid: ?[40]u8 = null;
             for (clone_result.refs) |ref| {
                 if (std.mem.eql(u8, ref.name, "HEAD")) {
-                    head_ref = &ref.hash;
+                    head_ref = ref.hash;
                     head_hash_oid = ref.hash;
                     break;
                 }
@@ -2209,7 +2210,7 @@ pub const Repository = struct {
             var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
-                    std.mem.eql(u8, &ref.hash, head_hash))
+                    std.mem.eql(u8, &ref.hash, &head_hash))
                 {
                     head_target = ref.name;
                     break;
@@ -2308,10 +2309,10 @@ pub const Repository = struct {
         }
 
         // Write refs (branches + tags) and update HEAD
-        var head_ref: ?[]const u8 = null;
+        var head_ref: ?[40]u8 = null;
         for (clone_result.refs) |ref| {
             if (std.mem.eql(u8, ref.name, "HEAD")) {
-                head_ref = &ref.hash;
+                head_ref = ref.hash;
                 continue;
             }
             if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
@@ -2327,7 +2328,7 @@ pub const Repository = struct {
             var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
-                    std.mem.eql(u8, &ref.hash, head_hash))
+                    std.mem.eql(u8, &ref.hash, &head_hash))
                 {
                     head_target = ref.name;
                     break;
@@ -2411,10 +2412,10 @@ pub const Repository = struct {
         }
 
         // Write refs and update HEAD
-        var head_ref: ?[]const u8 = null;
+        var head_ref: ?[40]u8 = null;
         for (clone_result.refs) |ref| {
             if (std.mem.eql(u8, ref.name, "HEAD")) {
-                head_ref = &ref.hash;
+                head_ref = ref.hash;
                 continue;
             }
             if (std.mem.startsWith(u8, ref.name, "refs/heads/")) {
@@ -2429,7 +2430,7 @@ pub const Repository = struct {
             var head_target: []const u8 = defaultBranchFromCapabilities(clone_result.capabilities);
             for (clone_result.refs) |ref| {
                 if (std.mem.startsWith(u8, ref.name, "refs/heads/") and
-                    std.mem.eql(u8, &ref.hash, head_hash))
+                    std.mem.eql(u8, &ref.hash, &head_hash))
                 {
                     head_target = ref.name;
                     break;
