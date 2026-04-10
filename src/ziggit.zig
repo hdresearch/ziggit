@@ -4213,17 +4213,19 @@ pub const Repository = struct {
             });
         }
 
-        // Sort items by name (git requires sorted tree entries)
+        // Sort items by name — git requires tree entries sorted as if
+        // directories have a trailing '/'. See gitTreeEntryLessThan in git_helpers.zig.
         std.sort.block(TreeItem, items.items, {}, struct {
             fn lessThan(_: void, a: TreeItem, b: TreeItem) bool {
-                // Git sorts tree entries: directories get a trailing '/' for comparison
-                const a_suffix: []const u8 = if (std.mem.eql(u8, a.mode, "40000")) "/" else "";
-                const b_suffix: []const u8 = if (std.mem.eql(u8, b.mode, "40000")) "/" else "";
-                const a_key = std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ a.name, a_suffix }) catch return std.mem.lessThan(u8, a.name, b.name);
-                defer std.heap.page_allocator.free(a_key);
-                const b_key = std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ b.name, b_suffix }) catch return std.mem.lessThan(u8, a.name, b.name);
-                defer std.heap.page_allocator.free(b_key);
-                return std.mem.lessThan(u8, a_key, b_key);
+                const a_is_dir = std.mem.eql(u8, a.mode, "40000") or std.mem.eql(u8, a.mode, "040000");
+                const b_is_dir = std.mem.eql(u8, b.mode, "40000") or std.mem.eql(u8, b.mode, "040000");
+                const min_len = @min(a.name.len, b.name.len);
+                const order = std.mem.order(u8, a.name[0..min_len], b.name[0..min_len]);
+                if (order != .eq) return order == .lt;
+                if (a.name.len == b.name.len) return false;
+                const a_next: u8 = if (a.name.len > min_len) a.name[min_len] else if (a_is_dir) '/' else 0;
+                const b_next: u8 = if (b.name.len > min_len) b.name[min_len] else if (b_is_dir) '/' else 0;
+                return a_next < b_next;
             }
         }.lessThan);
 

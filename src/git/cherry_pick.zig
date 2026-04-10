@@ -779,28 +779,21 @@ fn writeTreeForDir(allocator: std.mem.Allocator, dirs: *std.StringHashMap(std.ar
         try entries.append(.{ .name = sub_name, .mode = 0o40000, .sha1 = sha1 });
     }
 
-    // Sort entries by name (git tree sorting)
+    // Sort entries by name (git tree sorting: dirs sort as if they have trailing '/')
     std.mem.sort(TreeEntry, entries.items, {}, struct {
         fn lessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
-            // Git sorts tree entries by name, with directories getting a trailing /
             const a_name = a.name;
             const b_name = b.name;
             const a_is_tree = a.mode == 0o40000;
             const b_is_tree = b.mode == 0o40000;
-            if (a_is_tree == b_is_tree) {
-                return std.mem.order(u8, a_name, b_name) == .lt;
-            }
-            // Compare as if trees have trailing /
             const min_len = @min(a_name.len, b_name.len);
             const cmp = std.mem.order(u8, a_name[0..min_len], b_name[0..min_len]);
             if (cmp != .eq) return cmp == .lt;
             if (a_name.len == b_name.len) return false;
-            if (a_name.len == min_len) {
-                if (a_is_tree) return '/' < b_name[min_len];
-                return true;
-            }
-            if (b_is_tree) return a_name[min_len] < '/';
-            return false;
+            // Names share a prefix — compare the "virtual" next character
+            const a_next: u8 = if (a_name.len > min_len) a_name[min_len] else if (a_is_tree) '/' else 0;
+            const b_next: u8 = if (b_name.len > min_len) b_name[min_len] else if (b_is_tree) '/' else 0;
+            return a_next < b_next;
         }
     }.lessThan);
 

@@ -288,9 +288,17 @@ pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator
     defer allocator.free(sorted_entries);
     
     std.sort.block(TreeEntry, sorted_entries, {}, struct {
-        fn lessThan(context: void, lhs: TreeEntry, rhs: TreeEntry) bool {
-            _ = context;
-            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        fn lessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
+            // Git tree sort: directories sort as if they had a trailing '/'
+            const a_is_dir = a.mode == .directory;
+            const b_is_dir = b.mode == .directory;
+            const min_len = @min(a.name.len, b.name.len);
+            const cmp = std.mem.order(u8, a.name[0..min_len], b.name[0..min_len]);
+            if (cmp != .eq) return cmp == .lt;
+            if (a.name.len == b.name.len) return false;
+            const a_next: u8 = if (a.name.len > min_len) a.name[min_len] else if (a_is_dir) '/' else 0;
+            const b_next: u8 = if (b.name.len > min_len) b.name[min_len] else if (b_is_dir) '/' else 0;
+            return a_next < b_next;
         }
     }.lessThan);
     

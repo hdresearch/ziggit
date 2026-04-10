@@ -250,21 +250,18 @@ pub const GitTree = struct {
     }
 };
 
-/// Compare function for sorting tree entries (git order)
-fn compareEntries(context: void, a: TreeEntry, b: TreeEntry) bool {
-    _ = context;
-    
-    // Git sorts entries by name, but directories get a trailing /
-    const a_name = if (a.isDirectory()) 
-        a.name ++ "/" 
-    else 
-        a.name;
-    const b_name = if (b.isDirectory()) 
-        b.name ++ "/" 
-    else 
-        b.name;
-    
-    return std.mem.order(u8, a_name, b_name) == .lt;
+/// Compare function for sorting tree entries (git order).
+/// Directories are compared as if they have a trailing '/'.
+fn compareEntries(_: void, a: TreeEntry, b: TreeEntry) bool {
+    const a_is_dir = a.isDirectory();
+    const b_is_dir = b.isDirectory();
+    const min_len = @min(a.name.len, b.name.len);
+    const cmp = std.mem.order(u8, a.name[0..min_len], b.name[0..min_len]);
+    if (cmp != .eq) return cmp == .lt;
+    if (a.name.len == b.name.len) return false;
+    const a_next: u8 = if (a.name.len > min_len) a.name[min_len] else if (a_is_dir) '/' else 0;
+    const b_next: u8 = if (b.name.len > min_len) b.name[min_len] else if (b_is_dir) '/' else 0;
+    return a_next < b_next;
 }
 
 /// Tree walker for recursive traversal

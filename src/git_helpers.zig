@@ -6456,6 +6456,25 @@ pub fn checkIfDifferentFromHEAD(entry: index_mod.IndexEntry, git_path: []const u
 }
 
 
+/// Git tree entry comparison: entries are sorted by name, but directories
+/// are compared as if they had a trailing '/'. This is required by the git
+/// format — GitHub rejects tree objects that violate this ordering.
+/// Example: "ceph-gc/" (dir) sorts BEFORE "ceph/" (dir) because '-' < '/'.
+pub fn gitTreeEntryLessThan(a_name: []const u8, a_mode: []const u8, b_name: []const u8, b_mode: []const u8) bool {
+    const a_is_dir = std.mem.eql(u8, a_mode, "40000") or std.mem.eql(u8, a_mode, "040000");
+    const b_is_dir = std.mem.eql(u8, b_mode, "40000") or std.mem.eql(u8, b_mode, "040000");
+    // Byte-by-byte comparison of the real name characters
+    const min_len = @min(a_name.len, b_name.len);
+    const order = std.mem.order(u8, a_name[0..min_len], b_name[0..min_len]);
+    if (order != .eq) return order == .lt;
+    // Names match up to min_len — compare the "virtual" next character
+    // For dirs the next char is '/', for blobs it's nothing (sorts first)
+    if (a_name.len == b_name.len) return false; // identical names
+    const a_next: u8 = if (a_name.len > min_len) a_name[min_len] else if (a_is_dir) '/' else 0;
+    const b_next: u8 = if (b_name.len > min_len) b_name[min_len] else if (b_is_dir) '/' else 0;
+    return a_next < b_next;
+}
+
 pub fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_mod.IndexEntry, prefix: []const u8, git_path: []const u8, platform_impl: *const platform_mod.Platform) ![]u8 {
     const TreeItem = struct {
         name: []const u8,
@@ -6537,27 +6556,7 @@ pub fn buildRecursiveTree(allocator: std.mem.Allocator, entries: []const index_m
     // Sort items by name (git requires sorted tree entries; dirs get trailing '/' for comparison)
     std.sort.block(TreeItem, items.items, {}, struct {
         fn lessThan(_: void, a: TreeItem, b: TreeItem) bool {
-            const a_is_dir = std.mem.eql(u8, a.mode, "40000");
-            const b_is_dir = std.mem.eql(u8, b.mode, "40000");
-            // Git tree sort: compare as if dirs have trailing '/'
-            if (a_is_dir and !b_is_dir) {
-                // Compare a.name + "/" vs b.name
-                const order = std.mem.order(u8, a.name, b.name[0..@min(a.name.len, b.name.len)]);
-                if (order != .eq) return order == .lt;
-                if (a.name.len < b.name.len) {
-                    return '/' < b.name[a.name.len];
-                }
-                return a.name.len < b.name.len;
-            } else if (!a_is_dir and b_is_dir) {
-                const order = std.mem.order(u8, a.name[0..@min(a.name.len, b.name.len)], b.name);
-                if (order != .eq) return order == .lt;
-                if (b.name.len < a.name.len) {
-                    return a.name[b.name.len] < '/';
-                }
-                return a.name.len < b.name.len;
-            } else {
-                return std.mem.lessThan(u8, a.name, b.name);
-            }
+            return gitTreeEntryLessThan(a.name, a.mode, b.name, b.mode);
         }
     }.lessThan);
 
@@ -15342,15 +15341,7 @@ pub fn writeTreeRecursive(allocator: std.mem.Allocator, idx: *index_mod.Index, p
     // helpers.Sort entries (git sorts trees specially - directories sort as if they had a trailing /)
     std.mem.sort(objects.TreeEntry, entries.items, {}, struct {
         fn lessThan(_: void, a: objects.TreeEntry, b: objects.TreeEntry) bool {
-            const a_name = if (std.mem.eql(u8, a.mode, "40000"))
-                std.fmt.allocPrint(std.heap.page_allocator, "{s}/", .{a.name}) catch a.name
-            else
-                a.name;
-            const b_name = if (std.mem.eql(u8, b.mode, "40000"))
-                std.fmt.allocPrint(std.heap.page_allocator, "{s}/", .{b.name}) catch b.name
-            else
-                b.name;
-            return std.mem.lessThan(u8, a_name, b_name);
+            return gitTreeEntryLessThan(a.name, a.mode, b.name, b.mode);
         }
     }.lessThan);
 

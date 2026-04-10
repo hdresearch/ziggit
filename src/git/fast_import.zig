@@ -1071,29 +1071,20 @@ fn State(comptime PlatformType: type) type {
                 });
             }
 
-            // Sort entries by name (git requires sorted trees)
+            // Sort entries by name (git requires sorted trees: dirs sort as if trailing '/')
             std.sort.insertion(objects.TreeEntry, direct_entries.items, {}, struct {
                 fn lessThan(_: void, a: objects.TreeEntry, b: objects.TreeEntry) bool {
-                    // Git sorts tree entries with directories having trailing /
                     const a_name = a.name;
                     const b_name = b.name;
-                    const a_is_dir = std.mem.eql(u8, a.mode, "40000");
-                    const b_is_dir = std.mem.eql(u8, b.mode, "40000");
-
-                    // For comparison, append '/' to directory names
-                    if (a_is_dir and !b_is_dir) {
-                        // Compare a_name/ with b_name
-                        const order = std.mem.order(u8, a_name, b_name[0..@min(a_name.len, b_name.len)]);
-                        if (order != .eq) return order == .lt;
-                        if (a_name.len < b_name.len) return '/' < b_name[a_name.len];
-                        return true; // a_name/ vs b_name (same prefix but a has /)
-                    } else if (!a_is_dir and b_is_dir) {
-                        const order = std.mem.order(u8, a_name[0..@min(a_name.len, b_name.len)], b_name);
-                        if (order != .eq) return order == .lt;
-                        if (a_name.len > b_name.len) return a_name[b_name.len] < '/';
-                        return false;
-                    }
-                    return std.mem.order(u8, a_name, b_name) == .lt;
+                    const a_is_dir = std.mem.eql(u8, a.mode, "40000") or std.mem.eql(u8, a.mode, "040000");
+                    const b_is_dir = std.mem.eql(u8, b.mode, "40000") or std.mem.eql(u8, b.mode, "040000");
+                    const min_len = @min(a_name.len, b_name.len);
+                    const cmp = std.mem.order(u8, a_name[0..min_len], b_name[0..min_len]);
+                    if (cmp != .eq) return cmp == .lt;
+                    if (a_name.len == b_name.len) return false;
+                    const a_next: u8 = if (a_name.len > min_len) a_name[min_len] else if (a_is_dir) '/' else 0;
+                    const b_next: u8 = if (b_name.len > min_len) b_name[min_len] else if (b_is_dir) '/' else 0;
+                    return a_next < b_next;
                 }
             }.lessThan);
 
