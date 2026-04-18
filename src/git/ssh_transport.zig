@@ -41,16 +41,13 @@ pub fn parseSshUrl(url: []const u8) !SshUrl {
         return parseSshSchemeUrl(url[6..]);
     }
 
-    // SCP-style: user@host:path
+    // SCP-style with user: user@host:path
     if (std.mem.indexOfScalar(u8, url, '@')) |at_pos| {
         const after_at = url[at_pos + 1 ..];
         if (std.mem.indexOfScalar(u8, after_at, ':')) |colon_pos| {
-            // Make sure this isn't ssh:// that we missed
             const host = after_at[0..colon_pos];
             const path = after_at[colon_pos + 1 ..];
             if (path.len == 0) return error.InvalidSshUrl;
-            // SCP-style colon separator — path must not start with //
-            // and host must not contain /
             if (std.mem.indexOfScalar(u8, host, '/') != null) return error.InvalidSshUrl;
             return SshUrl{
                 .user = url[0..at_pos],
@@ -60,6 +57,23 @@ pub fn parseSshUrl(url: []const u8) !SshUrl {
                 .absolute_path = false, // SCP-style paths are relative
             };
         }
+    }
+
+    // SCP-style without user: host:path (user comes from ~/.ssh/config)
+    if (std.mem.indexOfScalar(u8, url, ':')) |colon_pos| {
+        if (colon_pos == 0) return error.InvalidSshUrl;
+        const host = url[0..colon_pos];
+        if (std.mem.indexOfScalar(u8, host, '/') != null) return error.InvalidSshUrl;
+        const path = url[colon_pos + 1 ..];
+        if (path.len == 0) return error.InvalidSshUrl;
+        if (std.mem.startsWith(u8, path, "//")) return error.InvalidSshUrl;
+        return SshUrl{
+            .user = "", // empty — ssh will use ~/.ssh/config or current username
+            .host = host,
+            .port = null,
+            .path = path,
+            .absolute_path = false,
+        };
     }
 
     return error.InvalidSshUrl;
@@ -106,15 +120,29 @@ fn parseSshSchemeUrl(authority_and_path: []const u8) !SshUrl {
 /// Check if a URL looks like an SSH URL (SCP-style or ssh:// scheme)
 pub fn isSshUrl(url: []const u8) bool {
     if (std.mem.startsWith(u8, url, "ssh://")) return true;
-    // SCP-style: contains @ before first : and no :// scheme prefix
+    // Reject other known schemes
     if (std.mem.startsWith(u8, url, "http://") or
         std.mem.startsWith(u8, url, "https://") or
         std.mem.startsWith(u8, url, "git://") or
         std.mem.startsWith(u8, url, "file://"))
         return false;
+    // SCP-style with user: user@host:path
     if (std.mem.indexOfScalar(u8, url, '@')) |at_pos| {
         const after_at = url[at_pos + 1 ..];
         return std.mem.indexOfScalar(u8, after_at, ':') != null;
+    }
+    // SCP-style without user: host:path (relies on ~/.ssh/config for user)
+    // Must have a colon, host part must not be empty, must not contain '/',
+    // and path after colon must not be empty and must not start with '//'
+    // (which would indicate a scheme-like pattern).
+    if (std.mem.indexOfScalar(u8, url, ':')) |colon_pos| {
+        if (colon_pos == 0) return false; // empty host
+        const host = url[0..colon_pos];
+        if (std.mem.indexOfScalar(u8, host, '/') != null) return false; // has slash = not a host
+        const path = url[colon_pos + 1 ..];
+        if (path.len == 0) return false; // empty path
+        if (std.mem.startsWith(u8, path, "//")) return false; // looks like a scheme
+        return true;
     }
     return false;
 }
@@ -368,7 +396,7 @@ pub fn sendReceivePackSsh(
 
 fn spawnSshReceivePack(allocator: std.mem.Allocator, parsed: SshUrl) !std.process.Child {
     // Build the ssh command
-    // ssh [-p port] user@host "git-receive-pack '/path'"
+    // ssh [-p port] [user@]host "git-receive-pack '/path'"
     var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
 
@@ -387,8 +415,11 @@ fn spawnSshReceivePack(allocator: std.mem.Allocator, parsed: SshUrl) !std.proces
         try argv.append(try allocator.dupe(u8, port_str));
     }
 
-    // user@host
-    const user_host = try std.fmt.allocPrint(allocator, "{s}@{s}", .{ parsed.user, parsed.host });
+    // user@host or just host (ssh will use ~/.ssh/config for user)
+    const user_host = if (parsed.user.len > 0)
+        try std.fmt.allocPrint(allocator, "{s}@{s}", .{ parsed.user, parsed.host })
+    else
+        try allocator.dupe(u8, parsed.host);
     try argv.append(user_host);
 
     // git-receive-pack command with quoted path
@@ -409,7 +440,7 @@ fn spawnSshReceivePack(allocator: std.mem.Allocator, parsed: SshUrl) !std.proces
 
 fn spawnSshUploadPack(allocator: std.mem.Allocator, parsed: SshUrl) !std.process.Child {
     // Build the ssh command
-    // ssh [-p port] user@host "git-upload-pack '/path'"
+    // ssh [-p port] [user@]host "git-upload-pack '/path'"
     var argv = std.array_list.Managed([]const u8).init(allocator);
     defer argv.deinit();
 
@@ -428,8 +459,11 @@ fn spawnSshUploadPack(allocator: std.mem.Allocator, parsed: SshUrl) !std.process
         try argv.append(try allocator.dupe(u8, port_str));
     }
 
-    // user@host
-    const user_host = try std.fmt.allocPrint(allocator, "{s}@{s}", .{ parsed.user, parsed.host });
+    // user@host or just host (ssh will use ~/.ssh/config for user)
+    const user_host = if (parsed.user.len > 0)
+        try std.fmt.allocPrint(allocator, "{s}@{s}", .{ parsed.user, parsed.host })
+    else
+        try allocator.dupe(u8, parsed.host);
     try argv.append(user_host);
 
     // git-upload-pack command with quoted path
@@ -662,20 +696,47 @@ test "parseSshUrl - ssh:// with port" {
     try std.testing.expectEqualStrings("repos/project.git", result.path);
 }
 
+test "parseSshUrl - SCP-style without user" {
+    const r1 = try parseSshUrl("gitlab:me/repo.git");
+    try std.testing.expectEqualStrings("", r1.user);
+    try std.testing.expectEqualStrings("gitlab", r1.host);
+    try std.testing.expectEqualStrings("me/repo.git", r1.path);
+    try std.testing.expect(r1.port == null);
+    try std.testing.expect(!r1.absolute_path);
+
+    const r2 = try parseSshUrl("myhost:project.git");
+    try std.testing.expectEqualStrings("", r2.user);
+    try std.testing.expectEqualStrings("myhost", r2.host);
+    try std.testing.expectEqualStrings("project.git", r2.path);
+}
+
 test "parseSshUrl - invalid URLs" {
     try std.testing.expectError(error.InvalidSshUrl, parseSshUrl("https://github.com/user/repo"));
     try std.testing.expectError(error.InvalidSshUrl, parseSshUrl("/local/path"));
     try std.testing.expectError(error.InvalidSshUrl, parseSshUrl("ssh://noatsign/path"));
+    try std.testing.expectError(error.InvalidSshUrl, parseSshUrl(":path")); // empty host
+    try std.testing.expectError(error.InvalidSshUrl, parseSshUrl("host:")); // empty path
 }
 
 test "isSshUrl" {
+    // SCP-style with user
     try std.testing.expect(isSshUrl("git@github.com:user/repo.git"));
     try std.testing.expect(isSshUrl("ssh://git@github.com/repo.git"));
+    // SCP-style without user (host:path from ~/.ssh/config)
+    try std.testing.expect(isSshUrl("gitlab:me/repo.git"));
+    try std.testing.expect(isSshUrl("myhost:project/foo.git"));
+    try std.testing.expect(isSshUrl("gh:org/repo"));
+    // Not SSH
     try std.testing.expect(!isSshUrl("https://github.com/repo.git"));
     try std.testing.expect(!isSshUrl("http://github.com/repo.git"));
     try std.testing.expect(!isSshUrl("/local/path"));
     try std.testing.expect(!isSshUrl("git://github.com/repo.git"));
     try std.testing.expect(!isSshUrl("file:///path/to/repo"));
+    // Edge cases that must NOT be treated as SSH
+    try std.testing.expect(!isSshUrl(":path")); // empty host
+    try std.testing.expect(!isSshUrl("host:")); // empty path
+    try std.testing.expect(!isSshUrl("host://path")); // looks like scheme
+    try std.testing.expect(!isSshUrl("path/to/local")); // no colon at all
 }
 
 test "parseRefAdvertisement" {

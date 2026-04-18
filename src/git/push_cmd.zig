@@ -12,6 +12,7 @@ const ssh_transport = @import("ssh_transport.zig");
 /// Convert an SSH URL to HTTPS.
 /// git@github.com:org/repo.git → https://github.com/org/repo.git
 /// ssh://git@github.com/org/repo.git → https://github.com/org/repo.git
+/// gitlab:me/repo.git → https://gitlab/me/repo.git
 pub fn sshToHttps(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     // ssh://[user@]host/path
     if (std.mem.startsWith(u8, url, "ssh://")) {
@@ -20,13 +21,23 @@ pub fn sshToHttps(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
         const after_user = if (std.mem.indexOf(u8, rest, "@")) |at| rest[at + 1 ..] else rest;
         return std.fmt.allocPrint(allocator, "https://{s}", .{after_user}) catch null;
     }
-    // user@host:path (SCP-style)
+    // user@host:path (SCP-style with user)
     if (std.mem.indexOf(u8, url, "@")) |at| {
         const after_at = url[at + 1 ..];
         if (std.mem.indexOf(u8, after_at, ":")) |colon| {
             const host = after_at[0..colon];
             const path = after_at[colon + 1 ..];
             return std.fmt.allocPrint(allocator, "https://{s}/{s}", .{ host, path }) catch null;
+        }
+    }
+    // host:path (SCP-style without user, e.g. gitlab:me/repo.git)
+    if (std.mem.indexOf(u8, url, ":")) |colon| {
+        const host = url[0..colon];
+        if (host.len > 0 and std.mem.indexOfScalar(u8, host, '/') == null) {
+            const path = url[colon + 1 ..];
+            if (path.len > 0 and !std.mem.startsWith(u8, path, "//")) {
+                return std.fmt.allocPrint(allocator, "https://{s}/{s}", .{ host, path }) catch null;
+            }
         }
     }
     return null;

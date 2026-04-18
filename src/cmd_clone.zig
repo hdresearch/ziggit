@@ -354,16 +354,20 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
 
     const raw_target_dir = target_dir orelse blk: {
         // helpers.Extract directory name from helpers.URL
-        if (std.mem.lastIndexOfScalar(u8, url.?, '/')) |last_slash| {
-            const repo_name = url.?[last_slash + 1..];
-            if (std.mem.endsWith(u8, repo_name, ".git")) {
-                break :blk repo_name[0..repo_name.len - 4];
-            } else {
-                break :blk repo_name;
+        // Try last '/' first, then last ':' (for SCP-style host:path URLs)
+        const last_sep = std.mem.lastIndexOfScalar(u8, url.?, '/') orelse
+            std.mem.lastIndexOfScalar(u8, url.?, ':');
+        if (last_sep) |sep_pos| {
+            const repo_name = url.?[sep_pos + 1..];
+            if (repo_name.len > 0) {
+                if (std.mem.endsWith(u8, repo_name, ".git")) {
+                    break :blk repo_name[0..repo_name.len - 4];
+                } else {
+                    break :blk repo_name;
+                }
             }
-        } else {
-            break :blk "repository";
         }
+        break :blk "repository";
     };
     
     // helpers.Strip trailing slashes from target directory
