@@ -210,7 +210,7 @@ const NATIVE_COMMANDS = [_][]const u8{
     "--version", "-v", "--version-info", "--help", "-h", "help", "--exec-path",
     // Phase 2: newly native commands (pure Zig implementations)
     "count-objects", "show-ref", "for-each-ref", "verify-pack", "update-server-info",
-    "mktree", "name-rev", "fsck", "gc", "prune", "repack", "pack-objects",
+    "mktree", "name-rev", "fsck", "gc", "prune", "repack", "pack-objects", "serve",
     "index-pack", "reflog", "clean", "mktag",
     "merge-base", "unpack-objects", "bundle",
     "diff-tree", "diff-index", "var", "show-index", "prune-packed",

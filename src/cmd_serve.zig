@@ -3,8 +3,6 @@ const platform_mod = @import("platform/platform.zig");
 const git_serve = @import("git/git_serve.zig");
 
 pub fn cmdServe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
-    try platform_impl.writeStderr("DEBUG: cmdServe called successfully\\n");
-    
     var port: u16 = 9418;
     var repo_path: []const u8 = ".";
     
@@ -29,6 +27,9 @@ pub fn cmdServe(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var port_buf: [16]u8 = undefined;
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch unreachable;
     try platform_impl.writeStdout(port_str);
+    try platform_impl.writeStdout("\\n");
+    try platform_impl.writeStdout("Repository: ");
+    try platform_impl.writeStdout(repo_path);
     try platform_impl.writeStdout("\\n");
     
     try server.serve(port);
