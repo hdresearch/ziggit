@@ -15,3 +15,22 @@ package.json
 package-lock.json
 *.wasm.gz
 .DS_Store
+test-pack-*
+# Build artifacts & test binaries
+/bin/
+/cli_benchmark
+/cli-benchmark
+/optimization_benchmark
+/api_vs_cli_benchmark*
+/comprehensive_integration_test
+/core_git_ziggit_interop
+/git_interop_test*
+/test_cc
+/test_compat
+/test_extern
+/test_pack_simple
+zig-cache/
+wasmtime*
+*.tar.xz
+/test-pack-*.pack
+/test-pack-*.idx
