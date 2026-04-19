@@ -101,13 +101,14 @@ fn detectCurrentBranch() []const u8 {
 }
 
 /// Detect the default branch by reading origin/HEAD, then checking for
-/// origin/main or origin/master refs. Falls back to "main".
+/// origin/main or origin/master refs (loose or packed).
+/// Falls back to the current branch (from HEAD), then to "main".
 fn detectDefaultBranch() []const u8 {
     // Try reading .git/refs/remotes/origin/HEAD
     if (std.fs.cwd().openFile(".git/refs/remotes/origin/HEAD", .{})) |file| {
         defer file.close();
         var buf: [256]u8 = undefined;
-        const n = file.read(&buf) catch return "main";
+        const n = file.read(&buf) catch return detectCurrentBranch();
         const content = std.mem.trimRight(u8, buf[0..n], "\r\n ");
         // Format: "ref: refs/remotes/origin/BRANCH"
         const prefix = "ref: refs/remotes/origin/";
@@ -119,7 +120,7 @@ fn detectDefaultBranch() []const u8 {
         }
     } else |_| {}
 
-    // Fallback: check which ref files exist
+    // Check loose ref files
     if (std.fs.cwd().access(".git/refs/remotes/origin/master", .{})) |_| {
         return "master";
     } else |_| {}
@@ -127,7 +128,86 @@ fn detectDefaultBranch() []const u8 {
         return "main";
     } else |_| {}
 
-    return "main";
+    // Check packed-refs (ziggit clone stores refs here, not as loose files)
+    if (std.fs.cwd().openFile(".git/packed-refs", .{})) |file| {
+        defer file.close();
+        var pack_buf: [8192]u8 = undefined;
+        const pn = file.read(&pack_buf) catch return detectCurrentBranch();
+        const pack_content = pack_buf[0..pn];
+        if (std.mem.indexOf(u8, pack_content, "refs/remotes/origin/master") != null)
+            return "master";
+        if (std.mem.indexOf(u8, pack_content, "refs/remotes/origin/main") != null)
+            return "main";
+    } else |_| {}
+
+    // Final fallback: use whatever branch HEAD points to.
+    // This handles freshly cloned repos where origin tracking refs
+    // don't exist yet (ziggit clone doesn't create them).
+    return detectCurrentBranch();
+}
+
+/// After fetch, ensure refs/remotes/origin/<branch> exists.
+/// ziggit clone/fetch sometimes doesn't create tracking refs, which breaks
+/// merge. If the tracking ref is missing, create it from refs/heads/<branch>
+/// (they're the same right after clone, and fetch updates the local branch).
+fn ensureTrackingRef(branch: []const u8) void {
+    var path_buf: [256]u8 = undefined;
+    const tracking = std.fmt.bufPrint(&path_buf, ".git/refs/remotes/origin/{s}", .{branch}) catch return;
+
+    // Already exists as loose ref? Nothing to do.
+    if (std.fs.cwd().access(tracking, .{})) |_| return else |_| {}
+
+    // Check packed-refs for it
+    if (std.fs.cwd().openFile(".git/packed-refs", .{})) |pf| {
+        defer pf.close();
+        var pbuf: [8192]u8 = undefined;
+        const pn = pf.read(&pbuf) catch 0;
+        var search_buf: [128]u8 = undefined;
+        const needle = std.fmt.bufPrint(&search_buf, "refs/remotes/origin/{s}", .{branch}) catch return;
+        if (std.mem.indexOf(u8, pbuf[0..pn], needle) != null) return; // exists in packed-refs
+    } else |_| {}
+
+    // Missing — create from refs/heads/<branch>
+    var src_buf: [256]u8 = undefined;
+    const src_path = std.fmt.bufPrint(&src_buf, ".git/refs/heads/{s}", .{branch}) catch return;
+
+    // Try loose ref first
+    const hash = blk: {
+        if (std.fs.cwd().openFile(src_path, .{})) |sf| {
+            defer sf.close();
+            var hbuf: [64]u8 = undefined;
+            const hn = sf.read(&hbuf) catch break :blk null;
+            const h = std.mem.trimRight(u8, hbuf[0..hn], "\r\n ");
+            if (h.len >= 40) break :blk h;
+        } else |_| {}
+        // Try packed-refs
+        if (std.fs.cwd().openFile(".git/packed-refs", .{})) |pf2| {
+            defer pf2.close();
+            var pbuf2: [8192]u8 = undefined;
+            const pn2 = pf2.read(&pbuf2) catch break :blk null;
+            var search2_buf: [128]u8 = undefined;
+            const needle2 = std.fmt.bufPrint(&search2_buf, "refs/heads/{s}", .{branch}) catch break :blk null;
+            if (std.mem.indexOf(u8, pbuf2[0..pn2], needle2)) |pos| {
+                // Find the hash before this line — scan backwards for newline
+                if (pos >= 41) {
+                    const line_start = if (std.mem.lastIndexOfScalar(u8, pbuf2[0 .. pos - 1], '\n')) |nl| nl + 1 else 0;
+                    const h = std.mem.trimRight(u8, pbuf2[line_start..pos], " ");
+                    if (h.len >= 40) break :blk h;
+                }
+            }
+        } else |_| {}
+        break :blk null;
+    };
+
+    if (hash) |h| {
+        // Create parent dirs
+        std.fs.cwd().makePath(".git/refs/remotes/origin") catch return;
+        if (std.fs.cwd().createFile(tracking, .{})) |f| {
+            defer f.close();
+            f.writeAll(h) catch return;
+            f.writeAll("\n") catch {};
+        } else |_| {}
+    }
 }
 
 /// sync [BRANCH] — fetch origin and merge origin/BRANCH into current branch.
@@ -143,6 +223,9 @@ pub fn cmdRestart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIter
         printErr(allocator, "FAILED: fetch origin\n", .{});
         return e;
     };
+
+    // Ensure tracking ref exists (ziggit clone/fetch may not create it)
+    ensureTrackingRef(branch);
 
     // Merge instead of rebase. This preserves all local commit SHAs so that
     // `reset --hard HEAD~1` always goes to the previous local commit, not
