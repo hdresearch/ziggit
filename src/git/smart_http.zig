@@ -767,6 +767,14 @@ fn isCloneRelevantRef(name: []const u8) bool {
     return false;
 }
 
+/// For fetch: only branches (not tags or HEAD). Tags are handled
+/// separately by fetch_cmd based on --tags/tagopt config. HEAD always
+/// points to a branch we already track via refs/heads/*.
+fn isFetchRelevantRef(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "refs/heads/")) return true;
+    return false;
+}
+
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     // Use a single HTTP client for both requests (TLS connection reuse)
     var client = std.http.Client{ .allocator = allocator };
@@ -1829,8 +1837,9 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     }
 
     for (discovery.refs) |ref| {
-        // Skip pull request refs and other non-essential refs during fetch
-        if (!isCloneRelevantRef(ref.name)) continue;
+        // Skip tags and pull request refs during fetch — tags are handled
+        // by the fetch_cmd layer based on --tags/tagopt configuration.
+        if (!isFetchRelevantRef(ref.name)) continue;
 
         if (local_map.get(ref.name)) |local_hash| {
             if (!std.mem.eql(u8, &local_hash, &ref.hash)) {

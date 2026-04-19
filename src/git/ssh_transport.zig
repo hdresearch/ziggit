@@ -156,6 +156,15 @@ fn isCloneRelevantRef(name: []const u8) bool {
     return false;
 }
 
+/// For fetch: only branches (not tags or HEAD). Tags are fetched
+/// separately by the fetch_cmd layer based on --tags/tagopt config.
+/// HEAD always points to a branch we're already tracking via
+/// refs/heads/*, so including it just adds a redundant (or stale) want.
+fn isFetchRelevantRef(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "refs/heads/")) return true;
+    return false;
+}
+
 /// Clone via SSH — returns pack data + refs just like smart_http.clonePack
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
     const parsed = try parseSshUrl(url);
@@ -258,7 +267,7 @@ pub fn fetchNewPack(allocator: std.mem.Allocator, url: []const u8, local_refs: [
     }
 
     for (discovery.refs) |ref| {
-        if (!isCloneRelevantRef(ref.name)) continue;
+        if (!isFetchRelevantRef(ref.name)) continue;
         if (local_map.get(ref.name)) |local_hash| {
             if (!std.mem.eql(u8, &local_hash, &ref.hash)) {
                 if (!want_set.contains(&ref.hash)) {
