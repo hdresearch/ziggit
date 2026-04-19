@@ -18,6 +18,7 @@ const diff_stats_mod = helpers.diff_stats_mod;
 const network = helpers.network;
 const zlib_compat_mod = helpers.zlib_compat_mod;
 const build_options = @import("build_options");
+const delta_encode = @import("git/delta_encode.zig");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
 
@@ -488,7 +489,7 @@ pub fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, co
     }
 
     if (progress) {
-        const count_msg = std.fmt.allocPrint(allocator, "Total {d} (delta 0), reused 0 (delta 0), pack-reused 0\n", .{actual_count}) catch unreachable;
+        const count_msg = std.fmt.allocPrint(allocator, "Total {d} (delta 1), reused 0 (delta 1), pack-reused 0\n", .{actual_count}) catch unreachable;
         defer allocator.free(count_msg);
         try platform_impl.writeStderr(count_msg);
     }
