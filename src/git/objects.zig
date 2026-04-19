@@ -404,20 +404,53 @@ pub fn cInflateIntoBuf(input: []const u8, output: []u8) ?struct { consumed: usiz
     return null;
 }
 
-/// Compress data using C zlib (more reliable than Zig flate)
+/// Compress data using C zlib when available, falling back to Zig's
+/// built-in flate compressor for statically-linked binaries where
+/// dynamic libz isn't loadable.
 pub fn cCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     initCZlib();
-    const compress_fn = zlib_compress_fn orelse return error.CompressionFailed;
-    const bound_fn = zlib_compress_bound_fn orelse return error.CompressionFailed;
-    const bound = bound_fn(@intCast(input.len));
-    const dest = try allocator.alloc(u8, @intCast(bound));
-    errdefer allocator.free(dest);
-    var dest_len: c_ulong = @intCast(dest.len);
-    const ret = compress_fn(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
-    if (ret != 0) return error.CompressionFailed;
-    const actual_len = @as(usize, @intCast(dest_len));
-    // Shrink in place instead of alloc+copy+free
-    return allocator.realloc(dest, actual_len) catch dest[0..actual_len];
+    if (zlib_compress_fn) |compress_fn| {
+        if (zlib_compress_bound_fn) |bound_fn| {
+            const bound = bound_fn(@intCast(input.len));
+            const dest = try allocator.alloc(u8, @intCast(bound));
+            errdefer allocator.free(dest);
+            var dest_len: c_ulong = @intCast(dest.len);
+            const ret = compress_fn(dest.ptr, &dest_len, input.ptr, @intCast(input.len));
+            if (ret != 0) return error.CompressionFailed;
+            const actual_len = @as(usize, @intCast(dest_len));
+            return allocator.realloc(dest, actual_len) catch dest[0..actual_len];
+        }
+    }
+    // Fallback: use Zig's built-in flate compressor (works on all targets
+    // including statically-linked Linux binaries where dlopen fails).
+    return zigCompressSlice(allocator, input);
+}
+
+/// Pure-Zig zlib compression (no C dependency). Used as fallback when
+/// dynamic libz isn't available.
+fn zigCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const Io = std.Io;
+    const flate = std.compress.flate;
+    const Compress = flate.Compress;
+
+    // Allocating writer collects compressed output
+    var aw: Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    const comp_buf_size = flate.max_window_len * 2 + 512 * 1024;
+    const comp_buf = allocator.alloc(u8, comp_buf_size) catch return error.CompressionFailed;
+    defer allocator.free(comp_buf);
+
+    var comp: Compress = .init(&aw.writer, comp_buf, .{ .container = .zlib });
+    _ = comp.writer.writeAll(input) catch return error.CompressionFailed;
+    comp.end() catch return error.CompressionFailed;
+
+    const result = aw.written();
+    // Copy to caller-owned allocation
+    const owned = allocator.alloc(u8, result.len) catch return error.CompressionFailed;
+    @memcpy(owned, result);
+    aw.deinit();
+    return owned;
 }
 
 // ============================================================
