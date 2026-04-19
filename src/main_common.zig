@@ -28,6 +28,7 @@ const cmd_commit = @import("cmd_commit.zig");
 const cmd_commit_tree = @import("cmd_commit_tree.zig");
 const cmd_count_objects = @import("cmd_count_objects.zig");
 const cmd_daemon = @import("cmd_daemon.zig");
+const cmd_serve = @import("cmd_serve.zig");
 const cmd_upload_pack = @import("cmd_upload_pack.zig");
 const cmd_describe = @import("cmd_describe.zig");
 const cmd_diff_core = @import("cmd_diff_core.zig");
@@ -966,7 +967,7 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
                 "show-index", "show-ref", "sparse-checkout", "stash", "status",
                 "stripspace", "submodule", "switch", "symbolic-ref", "tag",
                 "unpack-file", "unpack-objects", "update-index", "update-ref",
-                "update-server-info", "upload-archive", "upload-pack", "var",
+                "serve", "update-server-info", "upload-archive", "upload-pack", "var",
                 "verify-commit", "verify-pack", "verify-tag", "version", "worktree",
                 "write-tree",
             };
@@ -1174,6 +1175,8 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_last_modified.cmdLastModified(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "daemon")) {
         try cmd_daemon.cmdDaemon(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "serve")) {
+        try cmd_serve.cmdServe(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "upload-pack")) {
         try cmd_upload_pack.cmdUploadPack(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "receive-pack") or std.mem.eql(u8, command, "send-pack") or std.mem.eql(u8, command, "upload-archive")) {
