@@ -489,7 +489,7 @@ pub fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, co
     }
 
     if (progress) {
-        const count_msg = std.fmt.allocPrint(allocator, "Total {d} (delta 1), reused 0 (delta 1), pack-reused 0\n", .{actual_count}) catch unreachable;
+        const count_msg = std.fmt.allocPrint(allocator, "Total {d} (delta 0), reused 0 (delta 0), pack-reused 0\n", .{actual_count}) catch unreachable;
         defer allocator.free(count_msg);
         try platform_impl.writeStderr(count_msg);
     }
