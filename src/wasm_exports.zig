@@ -34,6 +34,70 @@ extern fn host_get_cwd(data_ptr: *[*]u8, data_len: *u32) bool;
 extern fn host_http_get(url_ptr: [*]const u8, url_len: u32, response_ptr: *[*]u8, response_len: *u32) i32;
 extern fn host_http_post(url_ptr: [*]const u8, url_len: u32, body_ptr: [*]const u8, body_len: u32, content_type_ptr: [*]const u8, content_type_len: u32, response_ptr: *[*]u8, response_len: *u32) i32;
 
+// ========== Git object storage host imports ==========
+// These let the JS host provide any backing store (SQLite, KV, memory, etc.)
+
+/// Retrieve a git object by its SHA-1 hash.
+/// hash_ptr: pointer to 20 raw bytes (binary SHA-1)
+/// data_ptr: out — host sets this to point at object data
+/// data_len: out — host sets this to the data length
+/// type_out: out — host sets this to object type (1=commit, 2=tree, 3=blob, 4=tag)
+/// Returns true if object exists, false otherwise.
+extern fn host_get_object(hash_ptr: [*]const u8, hash_len: u32, data_ptr: *[*]u8, data_len: *u32, type_out: *u32) bool;
+
+/// Store a git object.
+/// hash_ptr: 20 raw bytes (binary SHA-1)
+/// data_ptr: object content
+/// data_len: content length
+/// obj_type: 1=commit, 2=tree, 3=blob, 4=tag
+extern fn host_put_object(hash_ptr: [*]const u8, hash_len: u32, data_ptr: [*]const u8, data_len: u32, obj_type: u32) bool;
+
+/// Check if an object exists without retrieving it.
+extern fn host_object_exists(hash_ptr: [*]const u8, hash_len: u32) bool;
+
+/// Get a ref's target hash.
+/// name_ptr/name_len: ref name (e.g. "refs/heads/main")
+/// hash_out: 20-byte buffer for the binary hash
+/// Returns true if ref exists.
+extern fn host_get_ref(name_ptr: [*]const u8, name_len: u32, hash_out: [*]u8) bool;
+
+/// Set a ref to point at a hash.
+/// name_ptr/name_len: ref name
+/// hash_ptr: 20 raw bytes (binary SHA-1)
+extern fn host_set_ref(name_ptr: [*]const u8, name_len: u32, hash_ptr: [*]const u8) bool;
+
+/// Delete a ref.
+extern fn host_delete_ref(name_ptr: [*]const u8, name_len: u32) bool;
+
+/// List all refs. Host allocates and fills refs_ptr with ref data.
+/// refs_ptr: out — host sets this to point at serialized ref list
+/// refs_len: out — host sets this to the data length
+/// Format: each ref is "name\0hash\0" where hash is 40 hex chars
+extern fn host_list_refs(refs_ptr: *[*]u8, refs_len: *u32) bool;
+
+/// Get a config value.
+/// key_ptr/key_len: config key (e.g. "user.name")
+/// value_ptr: out — host sets this to point at value
+/// value_len: out — host sets this to value length
+/// Returns true if key exists.
+extern fn host_get_config(key_ptr: [*]const u8, key_len: u32, value_ptr: *[*]u8, value_len: *u32) bool;
+
+/// Set a config value.
+/// key_ptr/key_len: config key
+/// value_ptr/value_len: config value
+extern fn host_set_config(key_ptr: [*]const u8, key_len: u32, value_ptr: [*]const u8, value_len: u32) bool;
+
+/// Stream output data to the client (for git protocol responses).
+/// data_ptr: data to send
+/// data_len: data length
+extern fn host_stream_output(data_ptr: [*]const u8, data_len: u32) void;
+
+/// Log a message for debugging.
+/// level: 0=debug, 1=info, 2=warn, 3=error
+/// msg_ptr: message text
+/// msg_len: message length
+extern fn host_log_message(level: u32, msg_ptr: [*]const u8, msg_len: u32) void;
+
 // ========== Memory management ==========
 
 fn getAllocator() std.mem.Allocator {
