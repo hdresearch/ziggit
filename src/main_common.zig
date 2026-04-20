@@ -30,6 +30,7 @@ const cmd_count_objects = @import("cmd_count_objects.zig");
 const cmd_daemon = @import("cmd_daemon.zig");
 const cmd_serve = @import("cmd_serve.zig");
 const cmd_upload_pack = @import("cmd_upload_pack.zig");
+const cmd_receive_pack = @import("cmd_receive_pack.zig");
 const cmd_describe = @import("cmd_describe.zig");
 const cmd_diff_core = @import("cmd_diff_core.zig");
 const cmd_diff_tree = @import("cmd_diff_tree.zig");
@@ -1179,8 +1180,10 @@ pub fn zigzitMain(allocator: std.mem.Allocator) !void {
         try cmd_serve.cmdServe(allocator, &args_iter, &platform_impl);
     } else if (std.mem.eql(u8, command, "upload-pack")) {
         try cmd_upload_pack.cmdUploadPack(allocator, &args_iter, &platform_impl);
-    } else if (std.mem.eql(u8, command, "receive-pack") or std.mem.eql(u8, command, "send-pack") or std.mem.eql(u8, command, "upload-archive")) {
-        // Delegate to the dashed binary (git-upload-pack, git-receive-pack, etc.)
+    } else if (std.mem.eql(u8, command, "receive-pack")) {
+        try cmd_receive_pack.cmdReceivePack(allocator, &args_iter, &platform_impl);
+    } else if (std.mem.eql(u8, command, "send-pack") or std.mem.eql(u8, command, "upload-archive")) {
+        // Delegate to the dashed binary (git-upload-pack, git-send-pack, etc.)
         const dashed_name = try std.fmt.allocPrint(allocator, "git-{s}", .{command});
         defer allocator.free(dashed_name);
         // Find the dashed binary next to our executable or in PATH
