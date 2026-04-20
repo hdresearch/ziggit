@@ -52,6 +52,8 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var is_shared = false;
     var is_mirror = false;
     var clone_depth: u32 = 0;
+    var shallow_since: ?[]const u8 = null;
+    var shallow_exclude: ?[]const u8 = null;
     {
         var i: usize = 0;
         while (i < all_args.items.len) : (i += 1) {
@@ -67,6 +69,20 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 }
             } else if (std.mem.startsWith(u8, arg, "--depth=")) {
                 clone_depth = std.fmt.parseInt(u32, arg["--depth=".len..], 10) catch 0;
+            } else if (std.mem.eql(u8, arg, "--shallow-since")) {
+                if (i + 1 < all_args.items.len) {
+                    shallow_since = all_args.items[i + 1];
+                    i += 1; // skip the value
+                }
+            } else if (std.mem.startsWith(u8, arg, "--shallow-since=")) {
+                shallow_since = arg["--shallow-since=".len..];
+            } else if (std.mem.eql(u8, arg, "--shallow-exclude")) {
+                if (i + 1 < all_args.items.len) {
+                    shallow_exclude = all_args.items[i + 1];
+                    i += 1; // skip the value
+                }
+            } else if (std.mem.startsWith(u8, arg, "--shallow-exclude=")) {
+                shallow_exclude = arg["--shallow-exclude=".len..];
             }
         }
     }
