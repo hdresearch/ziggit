@@ -5,7 +5,11 @@ pub fn build(b: *std.Build) void {
     const enable_git_fallback = b.option(bool, "git-fallback", "Enable git CLI fallback") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "enable_git_fallback", enable_git_fallback);
-    const exe_optimize = optimize;
+    // Debug mode triggers an LLVM "Instruction does not dominate all uses" bug
+    // in Zig 0.15.x with this codebase. Default to ReleaseSafe instead —
+    // it compiles ~3x faster than ReleaseFast while catching safety issues.
+    // Use -Doptimize=ReleaseFast explicitly for production builds.
+    const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
     const exe = b.addExecutable(.{
         .name = "ziggit",
         .root_module = b.createModule(.{
