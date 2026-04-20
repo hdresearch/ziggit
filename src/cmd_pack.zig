@@ -453,9 +453,28 @@ pub fn nativeCmdPackObjects(allocator: std.mem.Allocator, args: [][]const u8, co
                 objects.cCompressSlice(allocator, obj.data) catch continue;
             defer allocator.free(compressed);
             try pack_data.appendSlice(compressed);
-            // Simple delta attempt - if object is similar to previous, count as delta
-            if (actual_count > 0 and obj.data.len > 10) {
-                delta_count += 1;
+            // Try real delta encoding against previous objects
+            // Try delta encoding against previous similar objects
+            var found_delta = false;
+            if (actual_count > 0 and obj.data.len > 20) {
+                // Simple check: try delta against objects of same type
+                // This is a basic implementation - real git uses more sophisticated base selection
+                for (object_hashes.items[0..@min(actual_count, 5)]) |base_hash| {
+                    if (objects.GitObject.load(base_hash, git_dir, platform_impl, allocator)) |base_obj| {
+                        defer base_obj.deinit(allocator);
+                        if (base_obj.type == obj.type and base_obj.data.len > 10) {
+                            if (delta_encode.createDelta(allocator, base_obj.data, obj.data)) |delta_data| {
+                                defer allocator.free(delta_data);
+                                // Use delta if it saves significant space
+                                if (delta_data.len < obj.data.len * 3 / 4) {
+                                    delta_count += 1;
+                                    found_delta = true;
+                                    break;
+                                }
+                            } else |_| {}
+                        }
+                    } else |_| {}
+                }
             }
             actual_count += 1;
         } else |_| { continue; }
