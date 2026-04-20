@@ -1524,10 +1524,21 @@ pub fn createBlobObject(data: []const u8, allocator: std.mem.Allocator) !GitObje
 }
 
 pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator) !GitObject {
+    // Git requires tree entries to be sorted by name. Directories sort as
+    // if their name has a trailing '/'. We sort a copy to avoid mutating
+    // the caller's slice, and to guarantee correctness for all callers.
+    const sorted = try allocator.dupe(TreeEntry, entries);
+    defer allocator.free(sorted);
+    std.sort.block(TreeEntry, sorted, {}, struct {
+        fn lessThan(_: void, a: TreeEntry, b: TreeEntry) bool {
+            return gitTreeEntryCmp(a, b);
+        }
+    }.lessThan);
+
     var content = std.array_list.Managed(u8).init(allocator);
     defer content.deinit();
 
-    for (entries) |entry| {
+    for (sorted) |entry| {
         // Git stores modes without leading zeros (e.g. "40000" not "040000")
         var mode = entry.mode;
         while (mode.len > 1 and mode[0] == '0') {
@@ -1542,6 +1553,26 @@ pub fn createTreeObject(entries: []const TreeEntry, allocator: std.mem.Allocator
 
     const data = try content.toOwnedSlice();
     return GitObject.init(.tree, data);
+}
+
+/// Git tree entry sort order: byte-by-byte comparison of names, but
+/// directories (mode "40000" or "040000") sort as if the name ends with '/'.
+fn gitTreeEntryCmp(a: TreeEntry, b: TreeEntry) bool {
+    const a_is_dir = isTreeMode(a.mode);
+    const b_is_dir = isTreeMode(b.mode);
+    const min_len = @min(a.name.len, b.name.len);
+    const order = std.mem.order(u8, a.name[0..min_len], b.name[0..min_len]);
+    if (order != .eq) return order == .lt;
+    // Names match up to min_len — compare the "virtual" next character.
+    // For dirs the virtual suffix is '/', for blobs there is none (0).
+    if (a.name.len == b.name.len) return false; // identical names
+    const a_next: u8 = if (a.name.len > min_len) a.name[min_len] else if (a_is_dir) '/' else 0;
+    const b_next: u8 = if (b.name.len > min_len) b.name[min_len] else if (b_is_dir) '/' else 0;
+    return a_next < b_next;
+}
+
+fn isTreeMode(mode: []const u8) bool {
+    return std.mem.eql(u8, mode, "40000") or std.mem.eql(u8, mode, "040000");
 }
 
 pub const TreeEntry = struct {
