@@ -8,6 +8,7 @@ const succinct_mod = @import("succinct.zig");
 const fetch_cmd = helpers.fetch_cmd;
 const cmd_checkout = @import("cmd_checkout.zig");
 
+const filter_spec_mod = @import("git/filter_spec.zig");
 // Re-export commonly used types from helpers
 const objects = helpers.objects;
 const index_mod = helpers.index_mod;
@@ -54,6 +55,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
     var clone_depth: u32 = 0;
     var shallow_since: ?[]const u8 = null;
     var shallow_exclude: ?[]const u8 = null;
+    var filter_spec: ?filter_spec_mod.FilterSpec = null;
     {
         var i: usize = 0;
         while (i < all_args.items.len) : (i += 1) {
@@ -82,6 +84,19 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     i += 1; // skip the value
                 }
             } else if (std.mem.startsWith(u8, arg, "--shallow-exclude=")) {
+            } else if (std.mem.eql(u8, arg, "--filter")) {
+                if (i + 1 < all_args.items.len) {
+                    filter_spec = filter_spec_mod.FilterSpec.parse(allocator, all_args.items[i + 1]) catch {
+                        try platform_impl.writeStderr("error: invalid filter specification\n");
+                        return;
+                    };
+                    i += 1; // skip the value
+                }
+            } else if (std.mem.startsWith(u8, arg, "--filter=")) {
+                filter_spec = filter_spec_mod.FilterSpec.parse(allocator, arg["--filter=".len..]) catch {
+                    try platform_impl.writeStderr("error: invalid filter specification\n");
+                    return;
+                };
                 shallow_exclude = arg["--shallow-exclude=".len..];
             }
         }

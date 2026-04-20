@@ -1,4 +1,5 @@
 const std = @import("std");
+const filter_spec_mod = @import("filter_spec.zig");
 const objects = @import("objects.zig");
 
 /// A ref entry for advertisement.
@@ -226,7 +227,7 @@ pub const GitServer = struct {
             ref_list.deinit();
         }
 
-        const capabilities = "multi_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed symref=HEAD:refs/heads/master object-format=sha1 agent=ziggit/1.0";
+        const capabilities = "multi_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative filter no-progress include-tag multi_ack_detailed symref=HEAD:refs/heads/master object-format=sha1 agent=ziggit/1.0";
 
         // Build and send ref advertisement
         var out = std.array_list.Managed(u8).init(self.allocator);
