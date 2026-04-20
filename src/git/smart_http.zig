@@ -225,7 +225,7 @@ pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []co
 // HTTP helpers
 // ============================================================================
 
-const max_response_size = 4 * 1024 * 1024 * 1024; // 4GB
+const max_response_size: usize = if (@sizeOf(usize) >= 8) 4 * 1024 * 1024 * 1024 else 256 * 1024 * 1024; // 4GB on 64-bit, 256MB on 32-bit
 
 /// Authentication info extracted from URL or environment
 const AuthInfo = struct {
@@ -410,7 +410,7 @@ fn httpPostWithClientOpts(allocator: std.mem.Allocator, existing_client: ?*std.h
     const result = blk: {
         if (resp.head.content_length) |cl| {
             if (cl > 0 and cl <= max_response_size) {
-                const buf = allocator.alloc(u8, cl) catch break :blk rdr.allocRemaining(allocator, std.io.Limit.limited(max_response_size)) catch return error.HttpError;
+                const buf = allocator.alloc(u8, @as(usize, @intCast(cl))) catch break :blk rdr.allocRemaining(allocator, std.io.Limit.limited(max_response_size)) catch return error.HttpError;
                 rdr.readSliceAll(buf) catch {
                     allocator.free(buf);
                     return error.HttpError;

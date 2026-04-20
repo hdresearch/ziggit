@@ -8,7 +8,7 @@ fn getArgsImpl(allocator: std.mem.Allocator) !interface.ArgIterator {
     var args = try std.process.ArgIterator.initWithAllocator(allocator);
     defer args.deinit();
     
-    var arg_list = std.array_list.Managed([]u8).init(allocator);
+    var arg_list = std.array_list.Managed([]const u8).init(allocator);
     defer arg_list.deinit();
     
     while (args.next()) |arg| {

@@ -1329,10 +1329,10 @@ pub const GitObject = struct {
         const content = try std.mem.concat(allocator, u8, &[_][]const u8{ header, self.data });
         defer allocator.free(content);
 
-        // Compress the content using C zlib for git compatibility (skip on WASM for stability)
+        // Compress the content using zlib for git compatibility
         const final_content = if (@import("builtin").target.os.tag == .wasi or @import("builtin").target.os.tag == .freestanding) blk: {
-            // For WASM builds, store uncompressed to avoid memory issues
-            break :blk try allocator.dupe(u8, content);
+            // For WASM builds, use pure-Zig flate compressor (no C zlib available)
+            break :blk try zlib_compat.compressSlice(allocator, content);
         } else blk: {
             break :blk try cCompressSlice(allocator, content);
         };

@@ -218,7 +218,7 @@ pub const Repository = struct {
             const idx_file = pack_dir.openFile(entry.name, .{}) catch continue;
             const idx_stat = idx_file.stat() catch { idx_file.close(); continue; };
             if (idx_stat.size < 1028) { idx_file.close(); continue; }
-            const idx_mmap = std.posix.mmap(null, idx_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, idx_file.handle, 0) catch {
+            const idx_mmap = std.posix.mmap(null, @as(usize, @intCast(idx_stat.size)), std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, idx_file.handle, 0) catch {
                 idx_file.close();
                 continue;
             };
@@ -236,17 +236,19 @@ pub const Repository = struct {
                 continue;
             };
             const pack_stat = pack_file.stat() catch { pack_file.close(); std.posix.munmap(idx_mmap); continue; };
-            const pack_mmap = std.posix.mmap(null, pack_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, pack_file.handle, 0) catch {
+            const pack_size = @as(usize, @intCast(pack_stat.size));
+            const pack_mmap = std.posix.mmap(null, pack_size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, pack_file.handle, 0) catch {
                 pack_file.close();
                 std.posix.munmap(idx_mmap);
                 continue;
             };
             pack_file.close();
 
+            const idx_size = @as(usize, @intCast(idx_stat.size));
             self._cached_pack_mmap = pack_mmap;
-            self._cached_pack_data = pack_mmap[0..pack_stat.size];
+            self._cached_pack_data = pack_mmap[0..pack_size];
             self._cached_idx_mmap = idx_mmap;
-            self._cached_idx_data = idx_mmap[0..idx_stat.size];
+            self._cached_idx_data = idx_mmap[0..idx_size];
 
             // Tell kernel we'll need these pages soon
             if (comptime @import("builtin").os.tag == .linux) {
@@ -2681,12 +2683,13 @@ pub const Repository = struct {
             const idx_file = pack_dir.openFile(entry.name, .{}) catch continue;
             const idx_stat = idx_file.stat() catch { idx_file.close(); continue; };
             if (idx_stat.size < 1028) { idx_file.close(); continue; }
-            const idx_mmap = std.posix.mmap(null, idx_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, idx_file.handle, 0) catch {
+            const idx_mmap = std.posix.mmap(null, @as(usize, @intCast(idx_stat.size)), std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, idx_file.handle, 0) catch {
                 idx_file.close();
                 continue;
             };
             idx_file.close();
-            const idx_data = idx_mmap[0..idx_stat.size];
+            const idx_size2 = @as(usize, @intCast(idx_stat.size));
+            const idx_data = idx_mmap[0..idx_size2];
 
             // Try lookup in this idx
             const offset = lookupIdxForOffsetFromData(idx_data, &target_hash) catch {
@@ -2706,7 +2709,8 @@ pub const Repository = struct {
                 continue;
             };
             const pack_stat = pack_file.stat() catch { pack_file.close(); std.posix.munmap(idx_mmap); continue; };
-            const pack_mmap = std.posix.mmap(null, pack_stat.size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, pack_file.handle, 0) catch {
+            const pack_size2 = @as(usize, @intCast(pack_stat.size));
+            const pack_mmap = std.posix.mmap(null, pack_size2, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, pack_file.handle, 0) catch {
                 pack_file.close();
                 std.posix.munmap(idx_mmap);
                 continue;
@@ -2727,9 +2731,9 @@ pub const Repository = struct {
                 self.allocator.free(old);
             }
             self._cached_pack_mmap = pack_mmap;
-            self._cached_pack_data = pack_mmap[0..pack_stat.size];
+            self._cached_pack_data = pack_mmap[0..pack_size2];
             self._cached_idx_mmap = idx_mmap;
-            self._cached_idx_data = idx_mmap[0..idx_stat.size];
+            self._cached_idx_data = idx_mmap[0..idx_size2];
 
             // Tell kernel we'll need these pages soon (async prefetch)
             if (comptime @import("builtin").os.tag == .linux) {
