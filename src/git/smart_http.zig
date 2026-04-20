@@ -157,6 +157,18 @@ pub fn writeFlushPkt() []const u8 {
     return "0000";
 }
 
+/// Shallow clone options for deepen-since and deepen-relative support.
+pub const DeepenOptions = struct {
+    /// Standard depth (number of commits). 0 means no depth limit.
+    depth: u32 = 0,
+    /// Timestamp for deepen-since (Unix epoch seconds). 0 means not set.
+    deepen_since: i64 = 0,
+    /// If true, depth is relative to current shallow boundary.
+    deepen_relative: bool = false,
+    /// Ref exclusions for deepen-not.
+    deepen_not: []const []const u8 = &.{},
+};
+
 /// Build the request body for git-upload-pack.
 /// If depth > 0, sends "deepen N" for shallow clone support.
 pub fn buildUploadPackRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid) ![]u8 {
@@ -164,15 +176,32 @@ pub fn buildUploadPackRequest(allocator: std.mem.Allocator, wants: []const Oid, 
 }
 
 pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
+    return buildUploadPackRequestWithOptions(allocator, wants, haves, .{ .depth = depth });
+}
+
+/// Build upload-pack request with deepen-since support.
+pub fn buildUploadPackRequestWithDeepenSince(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, since_timestamp: i64) ![]u8 {
+    return buildUploadPackRequestWithOptions(allocator, wants, haves, .{ .deepen_since = since_timestamp });
+}
+
+/// Build upload-pack request with deepen-relative support.
+pub fn buildUploadPackRequestWithDeepenRelative(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
+    return buildUploadPackRequestWithOptions(allocator, wants, haves, .{ .depth = depth, .deepen_relative = true });
+}
+
+/// Build upload-pack request with full deepen options.
+pub fn buildUploadPackRequestWithOptions(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, options: DeepenOptions) ![]u8 {
     var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
     // Pre-allocate: ~60 bytes per want/have line + capabilities on first
     try body.ensureTotalCapacity((wants.len + haves.len) * 60 + 256);
 
+    const is_shallow = options.depth > 0 or options.deepen_since != 0 or options.deepen_not.len > 0;
+
     // Include "shallow" and "deepen-since" in capabilities when doing shallow clone
     // "no-progress" suppresses progress messages, reducing response size and parse work
-    const capabilities = if (depth > 0)
-        "multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not no-progress"
+    const capabilities = if (is_shallow)
+        "multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress"
     else
         "multi_ack_detailed thin-pack side-band-64k ofs-delta no-progress";
 
@@ -190,15 +219,42 @@ pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []co
         try body.appendSlice(line);
     }
 
-    // Send deepen command before flush if depth is specified
-    if (depth > 0) {
-        var deepen_buf: [64]u8 = undefined;
-        const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{depth}) catch unreachable;
-        const deepen_pkt_len = deepen_line.len + 4;
-        var deepen_hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&deepen_hdr, "{x:0>4}", .{deepen_pkt_len}) catch unreachable;
-        try body.appendSlice(&deepen_hdr);
-        try body.appendSlice(deepen_line);
+    // Send deepen commands before flush
+    if (options.depth > 0) {
+        if (options.deepen_relative) {
+            // deepen-relative: depth is relative to existing shallow boundary
+            var deepen_buf: [64]u8 = undefined;
+            const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{options.depth}) catch unreachable;
+            const deepen_pkt_len = deepen_line.len + 4;
+            var deepen_hdr: [4]u8 = undefined;
+            _ = std.fmt.bufPrint(&deepen_hdr, "{x:0>4}", .{deepen_pkt_len}) catch unreachable;
+            try body.appendSlice(&deepen_hdr);
+            try body.appendSlice(deepen_line);
+            // Signal deepen-relative
+            try appendPktLine(&body, "deepen-relative\n");
+        } else {
+            var deepen_buf: [64]u8 = undefined;
+            const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{options.depth}) catch unreachable;
+            const deepen_pkt_len = deepen_line.len + 4;
+            var deepen_hdr: [4]u8 = undefined;
+            _ = std.fmt.bufPrint(&deepen_hdr, "{x:0>4}", .{deepen_pkt_len}) catch unreachable;
+            try body.appendSlice(&deepen_hdr);
+            try body.appendSlice(deepen_line);
+        }
+    }
+
+    // Send deepen-since if set
+    if (options.deepen_since != 0) {
+        var since_buf: [80]u8 = undefined;
+        const since_line = std.fmt.bufPrint(&since_buf, "deepen-since {d}\n", .{options.deepen_since}) catch unreachable;
+        try appendPktLine(&body, since_line);
+    }
+
+    // Send deepen-not refs
+    for (options.deepen_not) |ref| {
+        var not_buf: [256]u8 = undefined;
+        const not_line = std.fmt.bufPrint(&not_buf, "deepen-not {s}\n", .{ref}) catch unreachable;
+        try appendPktLine(&body, not_line);
     }
 
     // Flush after wants (and deepen)
@@ -219,6 +275,15 @@ pub fn buildUploadPackRequestWithDepth(allocator: std.mem.Allocator, wants: []co
     try body.appendSlice("0009done\n");
 
     return body.toOwnedSlice();
+}
+
+/// Helper to append a pkt-line formatted string to a buffer.
+fn appendPktLine(body: *std.array_list.Managed(u8), payload: []const u8) !void {
+    const pkt_len = payload.len + 4;
+    var hdr: [4]u8 = undefined;
+    _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
+    try body.appendSlice(&hdr);
+    try body.appendSlice(payload);
 }
 
 // ============================================================================
@@ -977,6 +1042,21 @@ fn parseV2LsRefsResponseFull(allocator: std.mem.Allocator, data: []const u8) !V2
 
 /// Build a v2 fetch command request body for shallow clone.
 fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
+    return buildV2FetchRequestWithDeepenOptions(allocator, wants, haves, .{ .depth = depth });
+}
+
+/// Build a V2 fetch request with deepen-since support.
+fn buildV2FetchRequestWithDeepenSince(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, since_timestamp: i64) ![]u8 {
+    return buildV2FetchRequestWithDeepenOptions(allocator, wants, haves, .{ .deepen_since = since_timestamp });
+}
+
+/// Build a V2 fetch request with deepen-relative support.
+fn buildV2FetchRequestWithDeepenRelative(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, depth: u32) ![]u8 {
+    return buildV2FetchRequestWithDeepenOptions(allocator, wants, haves, .{ .depth = depth, .deepen_relative = true });
+}
+
+/// Build a V2 fetch request with full deepen options.
+fn buildV2FetchRequestWithDeepenOptions(allocator: std.mem.Allocator, wants: []const Oid, haves: []const Oid, options: DeepenOptions) ![]u8 {
     var body = std.array_list.Managed(u8).init(allocator);
     errdefer body.deinit();
 
@@ -987,11 +1067,7 @@ fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: 
         "object-format=sha1\n",
     };
     for (cmd_lines) |line| {
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
+        try appendPktLine(&body, line);
     }
 
     // Delimiter
@@ -1004,55 +1080,51 @@ fn buildV2FetchRequest(allocator: std.mem.Allocator, wants: []const Oid, haves: 
         "ofs-delta\n",
     };
     for (args) |arg| {
-        const pkt_len = arg.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(arg);
+        try appendPktLine(&body, arg);
     }
 
-    // Depth
-    if (depth > 0) {
+    // Depth (deepen N)
+    if (options.depth > 0) {
         var deepen_buf: [64]u8 = undefined;
-        const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{depth}) catch unreachable;
-        const pkt_len = deepen_line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(deepen_line);
+        const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{options.depth}) catch unreachable;
+        try appendPktLine(&body, deepen_line);
+    }
+
+    // deepen-since (timestamp-based shallow)
+    if (options.deepen_since != 0) {
+        var since_buf: [80]u8 = undefined;
+        const since_line = std.fmt.bufPrint(&since_buf, "deepen-since {d}\n", .{options.deepen_since}) catch unreachable;
+        try appendPktLine(&body, since_line);
+    }
+
+    // deepen-relative flag
+    if (options.deepen_relative) {
+        try appendPktLine(&body, "deepen-relative\n");
+    }
+
+    // deepen-not refs
+    for (options.deepen_not) |ref| {
+        var not_buf: [256]u8 = undefined;
+        const not_line = std.fmt.bufPrint(&not_buf, "deepen-not {s}\n", .{ref}) catch unreachable;
+        try appendPktLine(&body, not_line);
     }
 
     // Wants
     for (wants) |want| {
         var line_buf: [128]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "want {s}\n", .{want}) catch unreachable;
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
+        try appendPktLine(&body, line);
     }
 
     // Haves
     for (haves) |have| {
         var line_buf: [128]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "have {s}\n", .{have}) catch unreachable;
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
+        try appendPktLine(&body, line);
     }
 
     // done
-    {
-        const line = "done\n";
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
-    }
+    try appendPktLine(&body, "done\n");
 
     // Flush
     try body.appendSlice("0000");
@@ -1387,11 +1459,7 @@ fn buildV2FetchRequestWithWantRef(allocator: std.mem.Allocator, want_refs: []con
         "object-format=sha1\n",
     };
     for (cmd_lines) |line| {
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
+        try appendPktLine(&body, line);
     }
 
     // Delimiter
@@ -1404,44 +1472,25 @@ fn buildV2FetchRequestWithWantRef(allocator: std.mem.Allocator, want_refs: []con
         "ofs-delta\n",
     };
     for (args) |arg| {
-        const pkt_len = arg.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(arg);
+        try appendPktLine(&body, arg);
     }
 
     // Depth
     if (depth > 0) {
         var deepen_buf: [64]u8 = undefined;
         const deepen_line = std.fmt.bufPrint(&deepen_buf, "deepen {d}\n", .{depth}) catch unreachable;
-        const pkt_len = deepen_line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(deepen_line);
+        try appendPktLine(&body, deepen_line);
     }
 
     // want-ref lines (by name, server resolves OID)
     for (want_refs) |ref_name| {
         var line_buf: [256]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "want-ref {s}\n", .{ref_name}) catch unreachable;
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
+        try appendPktLine(&body, line);
     }
 
     // done
-    {
-        const line = "done\n";
-        const pkt_len = line.len + 4;
-        var hdr: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&hdr, "{x:0>4}", .{pkt_len}) catch unreachable;
-        try body.appendSlice(&hdr);
-        try body.appendSlice(line);
-    }
+    try appendPktLine(&body, "done\n");
 
     // Flush
     try body.appendSlice("0000");

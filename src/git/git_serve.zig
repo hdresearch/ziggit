@@ -240,10 +240,20 @@ pub const GitServer = struct {
         defer wants.deinit();
         var haves = std.array_list.Managed([40]u8).init(self.allocator);
         defer haves.deinit();
+        var client_shallow = std.array_list.Managed([40]u8).init(self.allocator);
+        defer client_shallow.deinit();
         var done_received = false;
         var use_side_band = false;
+        var deepen_depth: u32 = 0;
+        var deepen_since: i64 = 0;
+        var deepen_relative = false;
+        var deepen_not_refs = std.array_list.Managed([]const u8).init(self.allocator);
+        defer {
+            for (deepen_not_refs.items) |r| self.allocator.free(r);
+            deepen_not_refs.deinit();
+        }
 
-        // Read want lines
+        // Read want lines (and shallow/deepen commands)
         while (true) {
             const line = try PktLine.readFromStream(self.allocator, stream) orelse break;
             defer self.allocator.free(line);
@@ -260,10 +270,67 @@ pub const GitServer = struct {
                         use_side_band = true;
                     }
                 }
+            } else if (std.mem.startsWith(u8, trimmed_line, "shallow ") and trimmed_line.len >= 48) {
+                var hash: [40]u8 = undefined;
+                @memcpy(&hash, trimmed_line[8..48]);
+                try client_shallow.append(hash);
+            } else if (std.mem.startsWith(u8, trimmed_line, "deepen ")) {
+                deepen_depth = std.fmt.parseInt(u32, trimmed_line[7..], 10) catch 0;
+            } else if (std.mem.startsWith(u8, trimmed_line, "deepen-since ")) {
+                deepen_since = std.fmt.parseInt(i64, trimmed_line[13..], 10) catch 0;
+            } else if (std.mem.eql(u8, trimmed_line, "deepen-relative")) {
+                deepen_relative = true;
+            } else if (std.mem.startsWith(u8, trimmed_line, "deepen-not ")) {
+                try deepen_not_refs.append(try self.allocator.dupe(u8, trimmed_line[11..]));
             }
         }
 
         if (wants.items.len == 0) return;
+
+        // Send shallow/unshallow responses if deepen was requested
+        if (deepen_depth > 0 or deepen_since != 0 or deepen_not_refs.items.len > 0) {
+            var shallow_buf = std.array_list.Managed(u8).init(self.allocator);
+            defer shallow_buf.deinit();
+
+            // Compute shallow boundary commits and send shallow/unshallow lines
+            var shallow_commits = try self.computeShallowBoundary(
+                git_dir,
+                wants.items,
+                client_shallow.items,
+                deepen_depth,
+                deepen_since,
+                deepen_relative,
+            );
+            defer {
+                for (shallow_commits.items) |s| self.allocator.free(s);
+                shallow_commits.deinit();
+            }
+
+            for (shallow_commits.items) |commit_hash| {
+                var line_buf: [64]u8 = undefined;
+                const shallow_line = std.fmt.bufPrint(&line_buf, "shallow {s}\n", .{commit_hash}) catch continue;
+                try PktLine.appendTo(&shallow_buf, shallow_line);
+            }
+
+            // Check for unshallow: commits that were shallow but are now fully reachable
+            for (client_shallow.items) |cs| {
+                var is_still_shallow = false;
+                for (shallow_commits.items) |sc| {
+                    if (std.mem.eql(u8, &cs, sc)) {
+                        is_still_shallow = true;
+                        break;
+                    }
+                }
+                if (!is_still_shallow) {
+                    var line_buf: [64]u8 = undefined;
+                    const unshallow_line = std.fmt.bufPrint(&line_buf, "unshallow {s}\n", .{cs}) catch continue;
+                    try PktLine.appendTo(&shallow_buf, unshallow_line);
+                }
+            }
+
+            try PktLine.appendFlush(&shallow_buf);
+            try stream.writeAll(shallow_buf.items);
+        }
 
         // Read have lines and negotiate
         while (true) {
@@ -630,6 +697,190 @@ pub const GitServer = struct {
                 }
             }
         }
+    }
+
+    /// Compute the shallow boundary for deepen operations.
+    /// Returns a list of commit hashes that should be the new shallow boundary.
+    fn computeShallowBoundary(
+        self: *GitServer,
+        git_dir: []const u8,
+        wants: [][40]u8,
+        client_shallow: [][40]u8,
+        depth: u32,
+        since_timestamp: i64,
+        relative: bool,
+    ) !std.array_list.Managed([]const u8) {
+        var boundary = std.array_list.Managed([]const u8).init(self.allocator);
+        errdefer {
+            for (boundary.items) |b| self.allocator.free(b);
+            boundary.deinit();
+        }
+
+        // For deepen-since: walk commits from wants and cut off at timestamp
+        if (since_timestamp != 0) {
+            for (wants) |want| {
+                try self.walkCommitsUntilTimestamp(git_dir, &want, since_timestamp, &boundary);
+            }
+            return boundary;
+        }
+
+        // For deepen / deepen-relative: walk commits to depth limit
+        if (depth > 0) {
+            const effective_depth = if (relative and client_shallow.len > 0)
+                depth // relative extends from current shallow boundary
+            else
+                depth;
+
+            for (wants) |want| {
+                try self.walkCommitsToDepth(git_dir, &want, effective_depth, &boundary);
+            }
+        }
+
+        return boundary;
+    }
+
+    /// Walk commits from start, stopping at the given depth. Commits at exactly
+    /// depth+1 become the shallow boundary.
+    fn walkCommitsToDepth(
+        self: *GitServer,
+        git_dir: []const u8,
+        start: []const u8,
+        max_depth: u32,
+        boundary: *std.array_list.Managed([]const u8),
+    ) !void {
+        const Entry = struct { hash: []const u8, depth_val: u32 };
+        var worklist = std.array_list.Managed(Entry).init(self.allocator);
+        defer {
+            for (worklist.items) |e| self.allocator.free(e.hash);
+            worklist.deinit();
+        }
+        var visited = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = visited.keyIterator();
+            while (it.next()) |k| self.allocator.free(@constCast(k.*));
+            visited.deinit();
+        }
+
+        try worklist.append(.{ .hash = try self.allocator.dupe(u8, start), .depth_val = 1 });
+
+        while (worklist.items.len > 0) {
+            const entry = worklist.orderedRemove(0);
+            defer self.allocator.free(entry.hash);
+
+            if (visited.contains(entry.hash)) continue;
+            const key = try self.allocator.dupe(u8, entry.hash);
+            try visited.put(key, {});
+
+            if (entry.depth_val > max_depth) {
+                // This commit is beyond the depth limit - it's a boundary
+                try boundary.append(try self.allocator.dupe(u8, entry.hash));
+                continue;
+            }
+
+            // Read commit and find parents
+            const obj = objects.GitObject.load(entry.hash, git_dir, FakePlatform{}, self.allocator) catch continue;
+            defer obj.deinit(self.allocator);
+
+            if (obj.type != .commit) continue;
+
+            var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+            while (line_iter.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                    try worklist.append(.{
+                        .hash = try self.allocator.dupe(u8, line[7..47]),
+                        .depth_val = entry.depth_val + 1,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Walk commits from start, stopping when commit timestamp < since_timestamp.
+    /// Commits whose parents are all older than since become the boundary.
+    fn walkCommitsUntilTimestamp(
+        self: *GitServer,
+        git_dir: []const u8,
+        start: []const u8,
+        since_timestamp: i64,
+        boundary: *std.array_list.Managed([]const u8),
+    ) !void {
+        var worklist = std.array_list.Managed([]const u8).init(self.allocator);
+        defer {
+            for (worklist.items) |w| self.allocator.free(w);
+            worklist.deinit();
+        }
+        var visited = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = visited.keyIterator();
+            while (it.next()) |k| self.allocator.free(@constCast(k.*));
+            visited.deinit();
+        }
+
+        try worklist.append(try self.allocator.dupe(u8, start));
+
+        while (worklist.items.len > 0) {
+            const hash = worklist.orderedRemove(0);
+            defer self.allocator.free(hash);
+
+            if (visited.contains(hash)) continue;
+            const key = try self.allocator.dupe(u8, hash);
+            try visited.put(key, {});
+
+            const obj = objects.GitObject.load(hash, git_dir, FakePlatform{}, self.allocator) catch continue;
+            defer obj.deinit(self.allocator);
+
+            if (obj.type != .commit) continue;
+
+            // Parse committer timestamp
+            const ts = self.parseCommitTimestamp(obj.data);
+            if (ts < since_timestamp) {
+                // This commit is older than since - it's a boundary
+                try boundary.append(try self.allocator.dupe(u8, hash));
+                continue;
+            }
+
+            // Walk parents
+            var line_iter = std.mem.splitScalar(u8, obj.data, '\n');
+            while (line_iter.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "parent ") and line.len >= 47) {
+                    try worklist.append(try self.allocator.dupe(u8, line[7..47]));
+                }
+            }
+        }
+    }
+
+    /// Parse the committer timestamp from commit object data.
+    fn parseCommitTimestamp(_: *GitServer, data: []const u8) i64 {
+        var line_iter = std.mem.splitScalar(u8, data, '\n');
+        while (line_iter.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "committer ")) {
+                // Format: "committer Name <email> timestamp timezone"
+                // Find last two spaces for timestamp and timezone
+                var last_space: ?usize = null;
+                var second_last_space: ?usize = null;
+                var i: usize = line.len;
+                while (i > 0) {
+                    i -= 1;
+                    if (line[i] == ' ') {
+                        if (last_space == null) {
+                            last_space = i;
+                        } else {
+                            second_last_space = i;
+                            break;
+                        }
+                    }
+                }
+                if (second_last_space) |sls| {
+                    if (last_space) |ls| {
+                        return std.fmt.parseInt(i64, line[sls + 1 .. ls], 10) catch 0;
+                    }
+                }
+            }
+        }
+        return 0;
     }
 
     fn generatePackData(self: *GitServer, git_dir: []const u8, wants: [][40]u8, haves: [][40]u8) ![]u8 {
