@@ -3,9 +3,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const crypto = std.crypto;
 const is_freestanding = builtin.os.tag == .freestanding;
+const is_wasm_like = is_freestanding or builtin.os.tag == .wasi;
 
 // Dynamic C zlib for reliable compression/decompression (not available on WASM/freestanding)
-var zlib_lib: ?if (is_freestanding) void else std.DynLib = null;
+var zlib_lib: ?if (is_wasm_like) void else std.DynLib = null;
 var zlib_compress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
 var zlib_compress_bound_fn: ?*const fn (c_ulong) callconv(.c) c_ulong = null;
 var zlib_uncompress_fn: ?*const fn ([*]u8, *c_ulong, [*]const u8, c_ulong) callconv(.c) c_int = null;
@@ -33,7 +34,7 @@ pub const ZStream = extern struct {
 };
 
 pub fn initCZlib() void {
-    if (comptime is_freestanding) return; // No DynLib on WASM
+    if (comptime is_wasm_like) return; // No DynLib on WASM/WASI
     if (zlib_init_attempted) return;
     zlib_init_attempted = true;
 
@@ -95,7 +96,7 @@ fn getReusableInflateStream() ?*ZStream {
             // Try inflateReset first, fall back to end+init
             if (!inflate_reset_looked_up) {
                 inflate_reset_looked_up = true;
-                if (comptime !is_freestanding) {
+                if (comptime !is_wasm_like) {
                     if (zlib_lib) |*lib| {
                         zlib_inflate_reset_fn = lib.lookup(*const fn (*ZStream) callconv(.c) c_int, "inflateReset");
                     }

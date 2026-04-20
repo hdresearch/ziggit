@@ -5,15 +5,24 @@ pub fn build(b: *std.Build) void {
     const enable_git_fallback = b.option(bool, "git-fallback", "Enable git CLI fallback") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "enable_git_fallback", enable_git_fallback);
+
+    // Detect WASM targets
+    const is_wasm = target.result.cpu.arch == .wasm32 or target.result.cpu.arch == .wasm64;
+    const is_wasi = target.result.os.tag == .wasi;
+
     // Debug mode triggers an LLVM "Instruction does not dominate all uses" bug
     // in Zig 0.15.x with this codebase. Default to ReleaseSmall —
     // fastest compilation (~60s on a 2-vCPU VM vs 5+ min for ReleaseFast).
     // Use -Doptimize=ReleaseFast explicitly for production builds.
     const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSmall else optimize;
+
+    // For WASI targets, use the WASI-specific entry point which avoids
+    // unsupported operations (networking, process spawning, mmap, etc.)
+    const root_source = if (is_wasi) b.path("src/main_wasi.zig") else b.path("src/main.zig");
     const exe = b.addExecutable(.{
         .name = "ziggit",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = root_source,
             .target = target,
             .optimize = exe_optimize,
             .strip = optimize != .Debug,
@@ -22,7 +31,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.linkLibC();
+    // Don't link libc for WASM targets
+    if (!is_wasm) exe.linkLibC();
 
     const install_exe = b.addInstallArtifact(exe, .{});
 
@@ -47,9 +57,15 @@ pub fn build(b: *std.Build) void {
     }
 
     // Create git -> ziggit symlink so test suite can find 'git' command
-    const symlink = b.addSystemCommand(&.{ "ln", "-sf", "ziggit", b.getInstallPath(.bin, "git") });
-    symlink.step.dependOn(&install_exe.step);
-    b.getInstallStep().dependOn(&symlink.step);
+    // (not applicable for WASM targets)
+    if (!is_wasm) {
+        const symlink = b.addSystemCommand(&.{ "ln", "-sf", "ziggit", b.getInstallPath(.bin, "git") });
+        symlink.step.dependOn(&install_exe.step);
+        b.getInstallStep().dependOn(&symlink.step);
+    } else {
+        // For WASM targets, directly depend on the install step
+        b.getInstallStep().dependOn(&install_exe.step);
+    }
 
     // WASM build target (wasm32-freestanding)
     const wasm_target = b.resolveTargetQuery(.{
