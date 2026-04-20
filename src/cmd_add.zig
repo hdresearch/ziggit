@@ -919,10 +919,12 @@ pub fn addDirectoryRecursivelyEx(allocator: std.mem.Allocator, repo_root: []cons
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_dir, entry.name });
         defer allocator.free(entry_relative_path);
 
-        // Check gitignore for this entry (applies to both files and directories)
+        // Check gitignore for this entry — use is_dir=true for directories
+        // so that patterns with trailing slash (e.g. ".zig-cache/") match.
+        const is_dir_entry = entry.kind == .directory;
         if (!force) {
             const gi_ptr: *const gitignore_mod.GitIgnore = &gitignore;
-            if (gitignore.isIgnored(entry_relative_path) or isParentDirIgnored(gi_ptr, entry_relative_path)) continue;
+            if (gitignore.isIgnoredPath(entry_relative_path, is_dir_entry) or isParentDirIgnored(gi_ptr, entry_relative_path)) continue;
         }
         
         const entry_full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ full_dir_path, entry.name });
