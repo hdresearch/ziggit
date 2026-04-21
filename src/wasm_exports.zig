@@ -2971,3 +2971,68 @@ export fn ziggit_unload_pack() i32 {
     global_idx_data = null;
     return 0;
 }
+const WasmGitServer = @import("git/wasm_git_serve.zig").WasmGitServer;
+
+/// Process a git-upload-pack request (fetch).
+export fn ziggit_serve_upload_pack(request_ptr: [*]const u8, request_len: u32) i32 {
+    const allocator = getAllocator();
+    const request = request_ptr[0..request_len];
+
+    var server = WasmGitServer.init(allocator, ".");
+    defer server.deinit();
+
+    server.serveUploadPack(request) catch |err| {
+        std.log.err("Upload pack failed: {}", .{err});
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Process a git-receive-pack request (push).
+export fn ziggit_serve_receive_pack(request_ptr: [*]const u8, request_len: u32) i32 {
+    const allocator = getAllocator();
+    const request = request_ptr[0..request_len];
+
+    var server = WasmGitServer.init(allocator, ".");
+    defer server.deinit();
+
+    server.serveReceivePack(request) catch |err| {
+        std.log.err("Receive pack failed: {}", .{err});
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Generate ref advertisement for info/refs endpoint.
+/// service: 0 = git-upload-pack, 1 = git-receive-pack
+export fn ziggit_serve_ref_advertisement(service: u32) i32 {
+    const allocator = getAllocator();
+
+    var server = WasmGitServer.init(allocator, ".");
+    defer server.deinit();
+
+    server.serveRefAdvertisement(service) catch |err| {
+        std.log.err("Ref advertisement failed: {}", .{err});
+        return -1;
+    };
+
+    return 0;
+}
+
+/// Process a protocol v2 command.
+export fn ziggit_serve_v2_command(request_ptr: [*]const u8, request_len: u32) i32 {
+    const allocator = getAllocator();
+    const request = request_ptr[0..request_len];
+
+    var server = WasmGitServer.init(allocator, ".");
+    defer server.deinit();
+
+    server.serveV2Command(request) catch |err| {
+        std.log.err("V2 command failed: {}", .{err});
+        return -1;
+    };
+
+    return 0;
+}
