@@ -1757,6 +1757,16 @@ pub const Repository = struct {
         return cloneBare(allocator, source, target);
     }
 
+    /// Clone with an optional partial-clone filter (e.g. "blob:none").
+    pub fn cloneBareFiltered(allocator: std.mem.Allocator, source: []const u8, target: []const u8, filter: ?[]const u8) !Repository {
+        if (std.mem.startsWith(u8, source, "https://") or
+            std.mem.startsWith(u8, source, "http://")) {
+            return cloneBareHttpsFiltered(allocator, source, target, filter);
+        }
+        // For non-HTTP protocols, filter is not yet supported; fall back to full clone
+        return cloneBare(allocator, source, target);
+    }
+
     pub fn cloneBare(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !Repository {
         if (std.mem.startsWith(u8, source, "https://") or
             std.mem.startsWith(u8, source, "http://")) {
@@ -2051,6 +2061,124 @@ pub const Repository = struct {
         };
 
         // Pre-warm pack cache for immediate findCommit/checkout use
+        if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
+            repo._cached_git_dir_fd = dir.fd;
+        } else |_| {}
+        repo.prewarmPackCache() catch {};
+
+        return repo;
+    }
+
+    /// Clone from HTTPS URL into a bare repository with partial-clone filter support.
+    fn cloneBareHttpsFiltered(allocator: std.mem.Allocator, url: []const u8, target: []const u8, filter: ?[]const u8) !Repository {
+        if (filter == null) return cloneBareHttps(allocator, url, target);
+
+        const smart_http = @import("git/smart_http.zig");
+        const pack_writer = @import("git/pack_writer.zig");
+        const idx_writer = @import("git/idx_writer.zig");
+
+        // Create bare repo structure
+        std.fs.cwd().makePath(target) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.AlreadyExists,
+            else => return err,
+        };
+        errdefer std.fs.cwd().deleteTree(target) catch {};
+
+        const git_dir = try allocator.dupe(u8, target);
+        errdefer allocator.free(git_dir);
+
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        {
+            const leaf_dirs = [_][]const u8{ "objects/pack", "refs/heads", "refs/tags" };
+            for (leaf_dirs) |d| {
+                const dir_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ target, d }) catch continue;
+                std.fs.cwd().makePath(dir_path) catch {};
+            }
+        }
+
+        // Write HEAD
+        const head_path = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch return error.PathTooLong;
+        {
+            const f = try std.fs.cwd().createFile(head_path, .{});
+            defer f.close();
+            try f.writeAll("ref: refs/heads/main\n");
+        }
+
+        // Write config for bare repo with partial clone (promisor remote)
+        {
+            var config_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const config_path = std.fmt.bufPrint(&config_buf, "{s}/config", .{target}) catch return error.PathTooLong;
+            const f = try std.fs.cwd().createFile(config_path, .{});
+            defer f.close();
+            try f.writeAll("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n[remote \"origin\"]\n\turl = ");
+            try f.writeAll(url);
+            try f.writeAll("\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n\tpromisor = true\n\tpartialclonefilter = ");
+            try f.writeAll(filter.?);
+            try f.writeAll("\n");
+        }
+
+        // Clone pack data via smart HTTP with filter
+        var clone_result = smart_http.clonePackWithFilter(allocator, url, filter) catch {
+            return error.HttpCloneFailed;
+        };
+        defer clone_result.deinit();
+
+        // Save pack data
+        if (clone_result.pack_data.len >= 32) {
+            const checksum_hex = try pack_writer.savePackFast(allocator, git_dir, clone_result.pack_data);
+            defer allocator.free(checksum_hex);
+
+            const idx_data = try idx_writer.generateIdxFromData(allocator, clone_result.pack_data);
+            defer allocator.free(idx_data);
+            const ip = try pack_writer.idxPath(allocator, git_dir, checksum_hex);
+            defer allocator.free(ip);
+            const idx_f = try std.fs.cwd().createFile(ip, .{});
+            defer idx_f.close();
+            try idx_f.writeAll(idx_data);
+        }
+
+        // Write refs
+        for (clone_result.refs) |ref| {
+            if (std.mem.startsWith(u8, ref.name, "refs/")) {
+                const ref_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ target, ref.name }) catch continue;
+                if (std.mem.lastIndexOfScalar(u8, ref_path, '/')) |last_slash| {
+                    std.fs.cwd().makePath(ref_path[0..last_slash]) catch {};
+                }
+                const f = std.fs.cwd().createFile(ref_path, .{}) catch continue;
+                defer f.close();
+                f.writeAll(&ref.hash) catch {};
+                f.writeAll("\n") catch {};
+            }
+        }
+
+        // Update HEAD
+        for (clone_result.refs) |ref| {
+            if (std.mem.eql(u8, ref.name, "HEAD")) {
+                const head_ref_path = std.fmt.bufPrint(&path_buf, "{s}/HEAD", .{target}) catch break;
+                // Try to find a branch with matching hash for symbolic ref
+                for (clone_result.refs) |br| {
+                    if (std.mem.startsWith(u8, br.name, "refs/heads/") and std.mem.eql(u8, &br.hash, &ref.hash)) {
+                        const hf = std.fs.cwd().createFile(head_ref_path, .{}) catch break;
+                        defer hf.close();
+                        hf.writeAll("ref: ") catch {};
+                        hf.writeAll(br.name) catch {};
+                        hf.writeAll("\n") catch {};
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        const path = try allocator.dupe(u8, target);
+
+        var repo = Repository{
+            .path = path,
+            .allocator = allocator,
+            .git_dir = git_dir,
+            ._pack_only = true,
+        };
+
         if (std.fs.openDirAbsolute(git_dir, .{})) |dir| {
             repo._cached_git_dir_fd = dir.fd;
         } else |_| {}

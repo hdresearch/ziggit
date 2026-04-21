@@ -167,6 +167,9 @@ pub const DeepenOptions = struct {
     deepen_relative: bool = false,
     /// Ref exclusions for deepen-not.
     deepen_not: []const []const u8 = &.{},
+    /// Partial clone filter spec (e.g. "blob:none", "blob:limit=10k", "tree:0").
+    /// null means no filter (full clone).
+    filter: ?[]const u8 = null,
 };
 
 /// Build the request body for git-upload-pack.
@@ -197,16 +200,23 @@ pub fn buildUploadPackRequestWithOptions(allocator: std.mem.Allocator, wants: []
     try body.ensureTotalCapacity((wants.len + haves.len) * 60 + 256);
 
     const is_shallow = options.depth > 0 or options.deepen_since != 0 or options.deepen_not.len > 0;
+    const has_filter = options.filter != null;
 
     // Include "shallow" and "deepen-since" in capabilities when doing shallow clone
     // "no-progress include-tag" suppresses progress messages, reducing response size and parse work
-    const capabilities = if (is_shallow)
+    // Include "filter" capability when partial clone is requested
+    const base_capabilities = if (is_shallow)
         "multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag"
     else
         "multi_ack_detailed thin-pack side-band-64k ofs-delta no-progress include-tag";
+    const capabilities = if (has_filter)
+        (std.fmt.allocPrint(allocator, "{s} filter", .{base_capabilities}) catch base_capabilities)
+    else
+        base_capabilities;
+    defer if (has_filter and capabilities.len > base_capabilities.len) allocator.free(capabilities);
 
     for (wants, 0..) |want, i| {
-        var line_buf: [256]u8 = undefined;
+        var line_buf: [512]u8 = undefined;
         const line = if (i == 0)
             std.fmt.bufPrint(&line_buf, "want {s} {s}\n", .{ want, capabilities }) catch unreachable
         else
@@ -255,6 +265,13 @@ pub fn buildUploadPackRequestWithOptions(allocator: std.mem.Allocator, wants: []
         var not_buf: [256]u8 = undefined;
         const not_line = std.fmt.bufPrint(&not_buf, "deepen-not {s}\n", .{ref}) catch unreachable;
         try appendPktLine(&body, not_line);
+    }
+
+    // Send filter spec for partial clone (e.g. "filter blob:none")
+    if (options.filter) |filter| {
+        var filter_buf: [256]u8 = undefined;
+        const filter_line = std.fmt.bufPrint(&filter_buf, "filter {s}\n", .{filter}) catch unreachable;
+        try appendPktLine(&body, filter_line);
     }
 
     // Flush after wants (and deepen)
@@ -590,6 +607,10 @@ pub fn fetchPack(allocator: std.mem.Allocator, url: []const u8, wants: []const O
 }
 
 fn fetchPackWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, url: []const u8, wants: []const Oid, haves: []const Oid) ![]u8 {
+    return fetchPackWithClientFiltered(allocator, client, url, wants, haves, null);
+}
+
+fn fetchPackWithClientFiltered(allocator: std.mem.Allocator, client: ?*std.http.Client, url: []const u8, wants: []const Oid, haves: []const Oid, filter: ?[]const u8) ![]u8 {
     var base = url;
     while (base.len > 0 and base[base.len - 1] == '/') {
         base = base[0 .. base.len - 1];
@@ -598,7 +619,7 @@ fn fetchPackWithClient(allocator: std.mem.Allocator, client: ?*std.http.Client, 
     const post_url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base});
     defer allocator.free(post_url);
 
-    const request_body = try buildUploadPackRequest(allocator, wants, haves);
+    const request_body = try buildUploadPackRequestWithOptions(allocator, wants, haves, .{ .filter = filter });
     defer allocator.free(request_body);
 
     const response = try httpPostWithClient(allocator, client, post_url, request_body, "application/x-git-upload-pack-request");
@@ -841,6 +862,11 @@ fn isFetchRelevantRef(name: []const u8) bool {
 }
 
 pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
+    return clonePackWithFilter(allocator, url, null);
+}
+
+/// Clone with an optional partial-clone filter (e.g. "blob:none").
+pub fn clonePackWithFilter(allocator: std.mem.Allocator, url: []const u8, filter: ?[]const u8) !CloneResult {
     // Use a single HTTP client for both requests (TLS connection reuse)
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
@@ -869,7 +895,7 @@ pub fn clonePack(allocator: std.mem.Allocator, url: []const u8) !CloneResult {
         while (it.next()) |key| allocator.free(@constCast(key.*));
     }
 
-    const pack_data = try fetchPackWithClient(allocator, &client, url, wants.items, &.{});
+    const pack_data = try fetchPackWithClientFiltered(allocator, &client, url, wants.items, &.{}, filter);
 
     return .{
         .refs = discovery.refs,
@@ -1107,6 +1133,13 @@ fn buildV2FetchRequestWithDeepenOptions(allocator: std.mem.Allocator, wants: []c
         var not_buf: [256]u8 = undefined;
         const not_line = std.fmt.bufPrint(&not_buf, "deepen-not {s}\n", .{ref}) catch unreachable;
         try appendPktLine(&body, not_line);
+    }
+
+    // Filter for partial clone (e.g. "filter blob:none")
+    if (options.filter) |filter| {
+        var filter_buf: [256]u8 = undefined;
+        const filter_line = std.fmt.bufPrint(&filter_buf, "filter {s}\n", .{filter}) catch unreachable;
+        try appendPktLine(&body, filter_line);
     }
 
     // Wants

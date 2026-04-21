@@ -27,10 +27,16 @@ const wildmatch_mod = @import("wildmatch.zig");
 
 /// Helper: clone bare with optional shallow depth
 fn doCloneBare(ziggit: type, allocator: std.mem.Allocator, clone_url: []const u8, bare_target: []const u8, clone_depth: u32) !ziggit.Repository {
-    return if (clone_depth > 0)
-        try ziggit.Repository.cloneBareShallow(allocator, clone_url, bare_target, clone_depth)
+    return doCloneBareWithFilter(ziggit, allocator, clone_url, bare_target, clone_depth, null);
+}
+
+fn doCloneBareWithFilter(ziggit: type, allocator: std.mem.Allocator, clone_url: []const u8, bare_target: []const u8, clone_depth: u32, filter: ?[]const u8) !ziggit.Repository {
+    if (filter != null)
+        return try ziggit.Repository.cloneBareFiltered(allocator, clone_url, bare_target, filter)
+    else if (clone_depth > 0)
+        return try ziggit.Repository.cloneBareShallow(allocator, clone_url, bare_target, clone_depth)
     else
-        try ziggit.Repository.cloneBare(allocator, clone_url, bare_target);
+        return try ziggit.Repository.cloneBare(allocator, clone_url, bare_target);
 }
 
 pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform, _: [][]const u8) !void {
@@ -114,7 +120,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 if (std.mem.eql(u8, arg, "--depth") or std.mem.eql(u8, arg, "-b") or
                     std.mem.eql(u8, arg, "--branch") or std.mem.eql(u8, arg, "--origin") or
                     std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--reference") or
-                    std.mem.eql(u8, arg, "--separate-git-dir"))
+                    std.mem.eql(u8, arg, "--separate-git-dir") or std.mem.eql(u8, arg, "--filter"))
                 {
                     i += 1; // skip the next arg (value)
                     continue;
@@ -150,7 +156,18 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 }
 
                 const ziggit = @import("ziggit.zig");
-                var repo = if (clone_depth > 0)
+                // Convert FilterSpec to protocol string for partial clone
+                const bare_filter_str: ?[]const u8 = if (filter_spec) |fs| (fs.toString(allocator) catch null) else null;
+                defer if (bare_filter_str) |s| allocator.free(s);
+
+                var repo = if (bare_filter_str != null)
+                    ziggit.Repository.cloneBareFiltered(allocator, url_val, final_target, bare_filter_str) catch |err| {
+                        const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
+                        defer allocator.free(emsg);
+                        try platform_impl.writeStderr(emsg);
+                        std.process.exit(128);
+                    }
+                else if (clone_depth > 0)
                     ziggit.Repository.cloneBareShallow(allocator, url_val, final_target, clone_depth) catch |err| {
                         const emsg = try std.fmt.allocPrint(allocator, "fatal: {}\n", .{err});
                         defer allocator.free(emsg);
@@ -518,13 +535,17 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
             else => return err,
         };
 
-        // Clone bare into .git subdirectory (with optional shallow depth)
+        // Clone bare into .git subdirectory (with optional shallow depth / filter)
         // Try primary URL first, fall back to alternate protocol on failure
         const push_cmd = @import("git/push_cmd.zig");
         var clone_alt_buf: ?[]u8 = null;
         defer if (clone_alt_buf) |u| allocator.free(u);
 
-        var repo = doCloneBare(ziggit, allocator, url.?, bare_target, clone_depth) catch blk: {
+        // Convert FilterSpec to protocol string (e.g. "blob:none")
+        const filter_str: ?[]const u8 = if (filter_spec) |fs| (fs.toString(allocator) catch null) else null;
+        defer if (filter_str) |s| allocator.free(s);
+
+        var repo = doCloneBareWithFilter(ziggit, allocator, url.?, bare_target, clone_depth, filter_str) catch blk: {
             const clone_is_https = std.mem.startsWith(u8, url.?, "http://") or std.mem.startsWith(u8, url.?, "https://");
 
             // If HTTPS, try with token first
@@ -533,7 +554,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                     platform_impl.writeStderr("hint: clone failed, retrying with API token...\n") catch {};
                     std.fs.cwd().deleteTree(bare_target) catch {};
                     std.fs.cwd().makePath(bare_target) catch {};
-                    if (doCloneBare(ziggit, allocator, token_url, bare_target, clone_depth)) |token_repo| {
+                    if (doCloneBareWithFilter(ziggit, allocator, token_url, bare_target, clone_depth, filter_str)) |token_repo| {
                         // Token-auth worked
                         clone_alt_buf = token_url;
                         platform_impl.writeStderr("hint: token-authenticated clone succeeded\n") catch {};
@@ -558,7 +579,7 @@ pub fn cmdClone(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, p
                 platform_impl.writeStderr(hint) catch {};
                 std.fs.cwd().deleteTree(bare_target) catch {};
                 std.fs.cwd().makePath(bare_target) catch {};
-                break :blk doCloneBare(ziggit, allocator, a, bare_target, clone_depth) catch {
+                break :blk doCloneBareWithFilter(ziggit, allocator, a, bare_target, clone_depth, filter_str) catch {
                     std.fs.cwd().deleteTree(final_target_dir) catch {};
                     const emsg = std.fmt.allocPrint(allocator, "fatal: could not clone from '{s}'\n", .{url.?}) catch "";
                     defer if (emsg.len > 0) allocator.free(emsg);
