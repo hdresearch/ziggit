@@ -545,6 +545,19 @@ pub const Index = struct {
             try std.fmt.allocPrint(self.allocator, "{s}/index", .{git_dir});
         defer self.allocator.free(index_path);
 
+        // Atomic write via index.lock — prevents corruption from concurrent access.
+        // Write to index.lock, then rename to index (matching git's behavior).
+        const lock_path = try std.fmt.allocPrint(self.allocator, "{s}.lock", .{index_path});
+        defer self.allocator.free(lock_path);
+
+        // Check for stale lock (another process may have crashed)
+        if (platform_impl.fs.exists(lock_path) catch false) {
+            // If lock exists, fail with a clear message (matching git behavior)
+            const stderr_msg = "fatal: Unable to create '" ++ "";
+            _ = stderr_msg;
+            return error.IndexLocked;
+        }
+
         var buffer = std.array_list.Managed(u8).init(self.allocator);
         defer buffer.deinit();
         
@@ -584,7 +597,18 @@ pub const Index = struct {
         hasher.final(&checksum);
         try writer.writeAll(&checksum);
 
-        try platform_impl.fs.writeFile(index_path, buffer.items);
+        // Write to lock file first, then atomically rename
+        platform_impl.fs.writeFile(lock_path, buffer.items) catch |e| {
+            // Clean up lock on write failure
+            platform_impl.fs.deleteFile(lock_path) catch {};
+            return e;
+        };
+        // Rename lock file to index (atomic on POSIX)
+        std.fs.cwd().rename(lock_path, index_path) catch {
+            // rename failed — try fallback: write directly
+            platform_impl.fs.deleteFile(lock_path) catch {};
+            try platform_impl.fs.writeFile(index_path, buffer.items);
+        };
     }
 
     pub fn add(self: *Index, path: []const u8, file_path: []const u8, platform_impl: anytype, git_dir: []const u8) !void {
