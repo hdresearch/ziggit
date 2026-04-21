@@ -2981,8 +2981,8 @@ export fn ziggit_serve_upload_pack(request_ptr: [*]const u8, request_len: u32) i
     var server = WasmGitServer.init(allocator, ".");
     defer server.deinit();
 
-    server.serveUploadPack(request) catch |err| {
-        std.log.err("Upload pack failed: {}", .{err});
+    server.serveUploadPack(request) catch {
+        
         return -1;
     };
 
@@ -2997,8 +2997,8 @@ export fn ziggit_serve_receive_pack(request_ptr: [*]const u8, request_len: u32) 
     var server = WasmGitServer.init(allocator, ".");
     defer server.deinit();
 
-    server.serveReceivePack(request) catch |err| {
-        std.log.err("Receive pack failed: {}", .{err});
+    server.serveReceivePack(request) catch {
+        
         return -1;
     };
 
@@ -3013,8 +3013,8 @@ export fn ziggit_serve_ref_advertisement(service: u32) i32 {
     var server = WasmGitServer.init(allocator, ".");
     defer server.deinit();
 
-    server.serveRefAdvertisement(service) catch |err| {
-        std.log.err("Ref advertisement failed: {}", .{err});
+    server.serveRefAdvertisement(service) catch {
+        
         return -1;
     };
 
@@ -3029,8 +3029,8 @@ export fn ziggit_serve_v2_command(request_ptr: [*]const u8, request_len: u32) i3
     var server = WasmGitServer.init(allocator, ".");
     defer server.deinit();
 
-    server.serveV2Command(request) catch |err| {
-        std.log.err("V2 command failed: {}", .{err});
+    server.serveV2Command(request) catch {
+        
         return -1;
     };
 

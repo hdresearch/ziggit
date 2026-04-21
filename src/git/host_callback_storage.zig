@@ -135,7 +135,7 @@ pub const HostCallbackStorage = struct {
             .tag => 4,
         };
 
-        var full_content = std.ArrayList(u8).init(self.allocator);
+        var full_content = std.array_list.Managed(u8).init(self.allocator);
         defer full_content.deinit();
         try full_content.appendSlice(header);
         try full_content.appendSlice(data);
@@ -191,14 +191,14 @@ pub const HostCallbackStorage = struct {
         const refs_data = refs_ptr[0..refs_len];
         defer self.allocator.free(refs_data);
 
-        var entries = std.ArrayList(RefEntry).init(self.allocator);
+        var entries = std.array_list.Managed(RefEntry).init(self.allocator);
         defer entries.deinit();
 
-        var lines = std.mem.split(u8, refs_data, "\n");
+        var lines = std.mem.splitScalar(u8, refs_data, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
 
-            var parts = std.mem.split(u8, line, ":");
+            var parts = std.mem.splitScalar(u8, line, ':');
             const name_part = parts.next() orelse continue;
             const hash_part = parts.next() orelse continue;
 
