@@ -207,7 +207,11 @@ pub fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hi
     }
     
     // SLOW PATH: Unknown size - use reusable scratch buffer
-    const uncompress_fn = zlib_uncompress_fn orelse return null;
+    const uncompress_fn = zlib_uncompress_fn orelse {
+        // Pure-Zig fallback (for WASM/freestanding where C zlib is unavailable)
+        const result = zigDecompressWithConsumed(allocator, input, size_hint) orelse return null;
+        return result.data;
+    };
     var needed = if (size_hint > 0) size_hint else @max(input.len * 4, 4096);
     var attempts: u8 = 0;
     while (attempts < 10) : (attempts += 1) {
@@ -232,11 +236,13 @@ pub fn cDecompressSlice(allocator: std.mem.Allocator, input: []const u8, size_hi
 /// Decompress using C zlib's inflate API, returning both data and consumed bytes.
 /// This is essential for pack index generation where we need to know exactly how
 /// many compressed bytes each object consumed.
-pub fn cDecompressWithConsumed(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?struct { data: []u8, consumed: usize } {
+pub const DecompressResult = struct { data: []u8, consumed: usize };
+
+pub fn cDecompressWithConsumed(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?DecompressResult {
     initCZlib();
-    const init_fn = zlib_inflate_init2_fn orelse return null;
-    const inflate_fn = zlib_inflate_fn orelse return null;
-    const end_fn = zlib_inflate_end_fn orelse return null;
+    const init_fn = zlib_inflate_init2_fn orelse return zigDecompressWithConsumed(allocator, input, size_hint);
+    const inflate_fn = zlib_inflate_fn orelse return zigDecompressWithConsumed(allocator, input, size_hint);
+    const end_fn = zlib_inflate_end_fn orelse return zigDecompressWithConsumed(allocator, input, size_hint);
 
     var stream: ZStream = std.mem.zeroes(ZStream);
     // inflateInit2_ with windowBits=15 (zlib format)
@@ -452,6 +458,37 @@ fn zigCompressSlice(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     @memcpy(owned, result);
     aw.deinit();
     return owned;
+}
+
+/// Pure-Zig zlib decompression with consumed-byte tracking (no C dependency).
+/// Used as fallback when dynamic libz isn't available (e.g. WASM/freestanding).
+fn zigDecompressWithConsumed(allocator: std.mem.Allocator, input: []const u8, size_hint: usize) ?DecompressResult {
+    _ = size_hint;
+    const Io = std.Io;
+    const flate = std.compress.flate;
+
+    var in: Io.Reader = .fixed(input);
+
+    const window_buf = allocator.alloc(u8, flate.max_window_len) catch return null;
+    defer allocator.free(window_buf);
+
+    var decomp: flate.Decompress = .init(&in, .zlib, window_buf);
+
+    var aw: Io.Writer.Allocating = .init(allocator);
+    _ = decomp.reader.streamRemaining(&aw.writer) catch {
+        aw.deinit();
+        return null;
+    };
+
+    const consumed = in.seek;
+    const result = aw.written();
+    const owned = allocator.alloc(u8, result.len) catch {
+        aw.deinit();
+        return null;
+    };
+    @memcpy(owned, result);
+    aw.deinit();
+    return .{ .data = owned, .consumed = consumed };
 }
 
 // ============================================================

@@ -3,7 +3,7 @@ const objects = @import("objects.zig");
 
 // Define the types locally to avoid circular imports
 pub const ObjectData = struct {
-    obj_type: objects.GitObject.ObjectType,
+    obj_type: objects.ObjectType,
     data: []const u8,
     allocator: std.mem.Allocator,
 
@@ -90,7 +90,7 @@ pub const HostCallbackStorage = struct {
         const data = data_ptr[0..data_len];
         const owned_data = try self.allocator.dupe(u8, data);
 
-        const obj_type: objects.GitObject.ObjectType = switch (type_out) {
+        const obj_type: objects.ObjectType = switch (type_out) {
             1 => .commit,
             2 => .tree,
             3 => .blob,
@@ -105,7 +105,7 @@ pub const HostCallbackStorage = struct {
         };
     }
 
-    pub fn writeObject(self: *HostCallbackStorage, obj_type: objects.GitObject.ObjectType, data: []const u8) ![40]u8 {
+    pub fn writeObject(self: *HostCallbackStorage, obj_type: objects.ObjectType, data: []const u8) ![40]u8 {
         const type_str = switch (obj_type) {
             .commit => "commit",
             .tree => "tree",

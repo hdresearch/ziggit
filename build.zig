@@ -155,6 +155,11 @@ pub fn build(b: *std.Build) void {
         "ziggit_read_object_by_index",
         "ziggit_memory_stats",
         "ziggit_unload_pack",
+        // WASM git server exports
+        "ziggit_serve_upload_pack",
+        "ziggit_serve_receive_pack",
+        "ziggit_serve_ref_advertisement",
+        "ziggit_serve_v2_command",
     };
 
     const wasm_step = b.step("wasm", "Build WASM module for browser");
