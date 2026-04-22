@@ -370,8 +370,17 @@ fn savePackData(allocator: std.mem.Allocator, git_dir: []const u8, pack_data: []
     defer pack_file.close();
     try pack_file.writeAll(pack_data);
 
-    // Generate index inline
-    try generatePackIdx(allocator, pack_data, pack_dir, &checksum_hex);
+    // Generate index using proper delta-resolving idx_writer
+    {
+        const idx_writer_mod = @import("git/idx_writer.zig");
+        const idx_data = try idx_writer_mod.generateIdxFromDataWithRepo(allocator, pack_data, git_dir);
+        defer allocator.free(idx_data);
+        const idx_path2 = try std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ pack_dir, checksum_hex });
+        defer allocator.free(idx_path2);
+        const idx_file2 = try std.fs.cwd().createFile(idx_path2, .{});
+        defer idx_file2.close();
+        try idx_file2.writeAll(idx_data);
+    }
 }
 
 fn applyRefUpdate(allocator: std.mem.Allocator, git_dir: []const u8, old_hash: *const [40]u8, new_hash: *const [40]u8, ref_name: []const u8) !void {

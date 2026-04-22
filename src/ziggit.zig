@@ -1494,8 +1494,9 @@ pub const Repository = struct {
                 const checksum_hex = try pack_writer.savePackFast(self.allocator, self.git_dir, fetch_result.pack_data);
                 defer self.allocator.free(checksum_hex);
 
-                // Generate idx from in-memory pack data (avoid re-reading from disk)
-                const idx_data = try idx_writer.generateIdxFromData(self.allocator, fetch_result.pack_data);
+                // Generate idx from in-memory pack data, passing git_dir for thin pack support
+                // (fetch packs may contain REF_DELTAs referencing bases in existing local packs)
+                const idx_data = try idx_writer.generateIdxFromDataWithRepo(self.allocator, fetch_result.pack_data, self.git_dir);
                 defer self.allocator.free(idx_data);
                 const ip = try pack_writer.idxPath(self.allocator, self.git_dir, checksum_hex);
                 defer self.allocator.free(ip);
@@ -1579,8 +1580,8 @@ pub const Repository = struct {
                 const checksum_hex = try pack_writer.savePackFast(self.allocator, self.git_dir, fetch_result.pack_data);
                 defer self.allocator.free(checksum_hex);
 
-                // Generate idx from in-memory pack data (avoid re-reading from disk)
-                const idx_data = try idx_writer.generateIdxFromData(self.allocator, fetch_result.pack_data);
+                // Generate idx from in-memory pack data, passing git_dir for thin pack support
+                const idx_data = try idx_writer.generateIdxFromDataWithRepo(self.allocator, fetch_result.pack_data, self.git_dir);
                 defer self.allocator.free(idx_data);
                 const ip = try pack_writer.idxPath(self.allocator, self.git_dir, checksum_hex);
                 defer self.allocator.free(ip);

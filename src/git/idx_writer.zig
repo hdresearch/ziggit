@@ -94,7 +94,14 @@ fn decompressToList(input: []const u8, output: *std.array_list.Managed(u8)) !usi
 }
 
 /// Generate idx data from in-memory pack data. Returns owned slice.
+/// For thin packs (e.g. from fetch), pass git_dir so REF_DELTAs referencing
+/// base objects in other local packs can be resolved.
 pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) ![]u8 {
+    return generateIdxFromDataWithRepo(allocator, pack_data, null);
+}
+
+/// Generate idx data, optionally resolving external bases from the local repo.
+pub fn generateIdxFromDataWithRepo(allocator: std.mem.Allocator, pack_data: []const u8, git_dir: ?[]const u8) ![]u8 {
     const is_freestanding = comptime @import("builtin").os.tag == .freestanding;
     const trace_timing = if (is_freestanding) false else (std.posix.getenv("ZIGGIT_TRACE_TIMING") != null);
     const PhaseTimer = if (is_freestanding) ?void else ?std.time.Timer;
@@ -346,6 +353,57 @@ pub fn generateIdxFromData(allocator: std.mem.Allocator, pack_data: []const u8) 
             if (new_unresolved == unresolved_count) break;
             unresolved_count = new_unresolved;
         }
+
+        // --- Resolve remaining REF_DELTAs from local repo (thin pack support) ---
+        unresolved_count = countUnresolved(records[0..total_objects]);
+        if (unresolved_count > 0 and git_dir != null) {
+            var max_ext_iters: usize = 50;
+            while (unresolved_count > 0 and max_ext_iters > 0) : (max_ext_iters -= 1) {
+                var new_unresolved: usize = 0;
+                for (records[0..total_objects]) |*rec| {
+                    if (rec.resolved) continue;
+
+                    // For REF_DELTAs, try loading the base from the repo
+                    if (rec.obj_type == 7) {
+                        // Skip if already resolved internally
+                        if (sha_to_offset.get(rec.base_sha1) != null) continue;
+
+                        resolveRefDeltaFromRepo(
+                            allocator,
+                            pack_data,
+                            content_end,
+                            rec,
+                            git_dir.?,
+                            &cache,
+                            &sha_to_offset,
+                        ) catch {
+                            new_unresolved += 1;
+                            continue;
+                        };
+                    } else if (rec.obj_type == 6) {
+                        // OFS_DELTA whose base is also an unresolved delta — retry
+                        resolveOfsDelta(
+                            allocator,
+                            pack_data,
+                            content_end,
+                            rec,
+                            records[0..total_objects],
+                            &offset_to_idx,
+                            &cache,
+                            &decomp_buf,
+                            &sha_to_offset,
+                        ) catch {
+                            new_unresolved += 1;
+                            continue;
+                        };
+                    } else {
+                        new_unresolved += 1;
+                    }
+                }
+                if (new_unresolved == unresolved_count) break;
+                unresolved_count = new_unresolved;
+            }
+        }
     }
 
     if (trace_timing) {
@@ -498,6 +556,166 @@ fn getBaseData(
     }
 
     return error.UnsupportedPackType;
+}
+
+/// Resolve a REF_DELTA by loading its base object from the local repository.
+/// This handles "thin packs" where the server omits base objects that the
+/// client already has in other pack files or as loose objects.
+fn resolveRefDeltaFromRepo(
+    allocator: std.mem.Allocator,
+    pack_data: []const u8,
+    content_end: usize,
+    rec: *ObjRecord,
+    git_dir: []const u8,
+    cache: *DeltaCache,
+    sha_to_offset: *std.AutoHashMap([20]u8, usize),
+) !void {
+    // Convert base SHA-1 bytes to hex string for object lookup
+    var hex_buf: [40]u8 = undefined;
+    for (rec.base_sha1, 0..) |b, i| {
+        const hc = "0123456789abcdef";
+        hex_buf[i * 2] = hc[b >> 4];
+        hex_buf[i * 2 + 1] = hc[b & 0xf];
+    }
+
+    // Try to load the base object from the repo (loose objects + other packs)
+    const base_result = loadObjectFromRepo(allocator, git_dir, &hex_buf) catch {
+        return error.BaseObjectNotFound;
+    };
+    defer allocator.free(base_result.data);
+
+    const base_type_str = base_result.type_str;
+
+    // Decompress the delta data
+    var decomp_buf = std.array_list.Managed(u8).init(allocator);
+    defer decomp_buf.deinit();
+    if (rec.size > 0) try decomp_buf.ensureTotalCapacity(rec.size);
+    _ = try stream_utils.decompressInto(
+        pack_data[rec.comp_start..@min(rec.comp_start + rec.comp_len, content_end)],
+        &decomp_buf,
+    );
+
+    // Apply delta to produce the result object
+    const result_data = try applyDelta(allocator, base_result.data, decomp_buf.items);
+    const sha1 = stream_utils.hashGitObject(base_type_str, result_data);
+
+    rec.sha1 = sha1;
+    rec.resolved = true;
+
+    sha_to_offset.put(sha1, rec.offset) catch {};
+    try cache.put(rec.offset, base_type_str, result_data);
+}
+
+const RepoObjectResult = struct {
+    data: []u8,
+    type_str: []const u8, // static string, not owned
+};
+
+/// Load a git object from the repo (loose objects first, then pack files).
+/// Returns the raw object data (without the git header) and type string.
+fn loadObjectFromRepo(allocator: std.mem.Allocator, git_dir: []const u8, hex_hash: *const [40]u8) !RepoObjectResult {
+    // Try loose object first
+    if (loadLooseObject(allocator, git_dir, hex_hash)) |result| {
+        return result;
+    } else |_| {}
+
+    // Try pack files
+    return loadFromExistingPacks(allocator, git_dir, hex_hash);
+}
+
+/// Load a loose object from .git/objects/xx/yyyy...
+fn loadLooseObject(allocator: std.mem.Allocator, git_dir: []const u8, hex_hash: *const [40]u8) !RepoObjectResult {
+    var path_buf: [4096]u8 = undefined;
+    const obj_path = std.fmt.bufPrint(&path_buf, "{s}/objects/{s}/{s}", .{
+        git_dir, hex_hash[0..2], hex_hash[2..],
+    }) catch return error.ObjectNotFound;
+
+    const compressed = std.fs.cwd().readFileAlloc(allocator, obj_path, 256 * 1024 * 1024) catch
+        return error.ObjectNotFound;
+    defer allocator.free(compressed);
+
+    // Decompress
+    const content = zlib_compat.decompressSlice(allocator, compressed) catch
+        return error.ObjectNotFound;
+    defer allocator.free(content);
+
+    // Parse "type size\0data"
+    const null_pos = std.mem.indexOf(u8, content, "\x00") orelse return error.ObjectNotFound;
+    const header = content[0..null_pos];
+    const space_pos = std.mem.indexOf(u8, header, " ") orelse return error.ObjectNotFound;
+    const type_str_raw = header[0..space_pos];
+
+    const type_str: []const u8 = if (std.mem.eql(u8, type_str_raw, "commit"))
+        "commit"
+    else if (std.mem.eql(u8, type_str_raw, "tree"))
+        "tree"
+    else if (std.mem.eql(u8, type_str_raw, "blob"))
+        "blob"
+    else if (std.mem.eql(u8, type_str_raw, "tag"))
+        "tag"
+    else
+        return error.ObjectNotFound;
+
+    const data = try allocator.dupe(u8, content[null_pos + 1 ..]);
+    return .{ .data = data, .type_str = type_str };
+}
+
+/// Load an object from existing pack files in the repo.
+fn loadFromExistingPacks(allocator: std.mem.Allocator, git_dir: []const u8, hex_hash: *const [40]u8) !RepoObjectResult {
+    var path_buf: [4096]u8 = undefined;
+    const pack_dir_path = std.fmt.bufPrint(&path_buf, "{s}/objects/pack", .{git_dir}) catch
+        return error.ObjectNotFound;
+
+    var pack_dir = std.fs.cwd().openDir(pack_dir_path, .{ .iterate = true }) catch
+        return error.ObjectNotFound;
+    defer pack_dir.close();
+
+    // Convert hex to bytes for pack lookup
+    var oid_bytes: [20]u8 = undefined;
+    for (0..20) |i| {
+        oid_bytes[i] = std.fmt.parseInt(u8, hex_hash[i * 2 ..][0..2], 16) catch return error.ObjectNotFound;
+    }
+
+    var iter = pack_dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
+
+        // Build full paths for idx and pack files
+        var idx_path_buf: [4096]u8 = undefined;
+        const idx_full = std.fmt.bufPrint(&idx_path_buf, "{s}/{s}", .{ pack_dir_path, entry.name }) catch continue;
+
+        const idx_data = std.fs.cwd().readFileAlloc(allocator, idx_full, 256 * 1024 * 1024) catch continue;
+        defer allocator.free(idx_data);
+
+        // Build pack path from idx path
+        var pack_path_buf2: [4096]u8 = undefined;
+        const pack_name_base = entry.name[0 .. entry.name.len - 4]; // strip ".idx"
+        const pack_full = std.fmt.bufPrint(&pack_path_buf2, "{s}/{s}.pack", .{ pack_dir_path, pack_name_base }) catch continue;
+
+        const existing_pack_data = std.fs.cwd().readFileAlloc(allocator, pack_full, 512 * 1024 * 1024) catch continue;
+        defer allocator.free(existing_pack_data);
+
+        // Use readPackObjectDirect which handles delta chains within the pack
+        const result = objects_mod.readPackObjectDirect(existing_pack_data, idx_data, oid_bytes) orelse continue;
+
+        // Convert pack type (u3) to type string
+        const type_str: []const u8 = switch (result.obj_type) {
+            1 => "commit",
+            2 => "tree",
+            3 => "blob",
+            4 => "tag",
+            else => continue,
+        };
+
+        // Copy data since readPackObjectDirect returns pointer to static buffer
+        const data_copy = try allocator.dupe(u8, result.data);
+        return .{
+            .data = data_copy,
+            .type_str = type_str,
+        };
+    }
+
+    return error.ObjectNotFound;
 }
 
 // ─── Utility functions ─────────────────────────────────────────────────

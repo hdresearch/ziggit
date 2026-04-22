@@ -622,8 +622,15 @@ pub fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, comm
             defer allocator.free(dest_pack);
             std.fs.cwd().writeFile(.{ .sub_path = dest_pack, .data = pack_data }) catch {};
 
-            // helpers.Generate idx
-            try generatePackIdx(allocator, pack_data, pack_dir, &hash_hex);
+            // helpers.Generate idx using proper delta-resolving idx_writer
+            {
+                const idx_writer_mod = @import("git/idx_writer.zig");
+                const idx_data2 = try idx_writer_mod.generateIdxFromDataWithRepo(allocator, pack_data, git_dir);
+                defer allocator.free(idx_data2);
+                const idx_dest = std.fmt.allocPrint(allocator, "{s}/pack-{s}.idx", .{ pack_dir, hash_hex }) catch unreachable;
+                defer allocator.free(idx_dest);
+                std.fs.cwd().writeFile(.{ .sub_path = idx_dest, .data = idx_data2 }) catch {};
+            }
 
             const msg = std.fmt.allocPrint(allocator, "pack\t{s}\n", .{hash_hex}) catch unreachable;
             defer allocator.free(msg);
@@ -658,7 +665,16 @@ pub fn nativeCmdIndexPack(allocator: std.mem.Allocator, args: [][]const u8, comm
         };
         defer if (output_path == null) allocator.free(idx_path);
 
-        try generatePackIdxToFile(allocator, pack_data, idx_path);
+        // Use proper delta-resolving idx_writer; try to find git_dir for thin pack support
+        {
+            const idx_writer_mod = @import("git/idx_writer.zig");
+            const maybe_git_dir = helpers.findGitDir() catch null;
+            const idx_data2 = try idx_writer_mod.generateIdxFromDataWithRepo(allocator, pack_data, maybe_git_dir);
+            defer allocator.free(idx_data2);
+            const idx_file = try std.fs.cwd().createFile(idx_path, .{});
+            defer idx_file.close();
+            try idx_file.writeAll(idx_data2);
+        }
 
         // helpers.Create .keep file if --keep was specified
         {
