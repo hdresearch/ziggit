@@ -355,53 +355,56 @@ pub fn generateIdxFromDataWithRepo(allocator: std.mem.Allocator, pack_data: []co
         }
 
         // --- Resolve remaining REF_DELTAs from local repo (thin pack support) ---
-        unresolved_count = countUnresolved(records[0..total_objects]);
-        if (unresolved_count > 0 and git_dir != null) {
-            var max_ext_iters: usize = 50;
-            while (unresolved_count > 0 and max_ext_iters > 0) : (max_ext_iters -= 1) {
-                var new_unresolved: usize = 0;
-                for (records[0..total_objects]) |*rec| {
-                    if (rec.resolved) continue;
+        // Not available on freestanding/WASM (no filesystem access for repo lookup)
+        if (comptime !is_freestanding) {
+            unresolved_count = countUnresolved(records[0..total_objects]);
+            if (unresolved_count > 0 and git_dir != null) {
+                var max_ext_iters: usize = 50;
+                while (unresolved_count > 0 and max_ext_iters > 0) : (max_ext_iters -= 1) {
+                    var new_unresolved: usize = 0;
+                    for (records[0..total_objects]) |*rec| {
+                        if (rec.resolved) continue;
 
-                    // For REF_DELTAs, try loading the base from the repo
-                    if (rec.obj_type == 7) {
-                        // Skip if already resolved internally
-                        if (sha_to_offset.get(rec.base_sha1) != null) continue;
+                        // For REF_DELTAs, try loading the base from the repo
+                        if (rec.obj_type == 7) {
+                            // Skip if already resolved internally
+                            if (sha_to_offset.get(rec.base_sha1) != null) continue;
 
-                        resolveRefDeltaFromRepo(
-                            allocator,
-                            pack_data,
-                            content_end,
-                            rec,
-                            git_dir.?,
-                            &cache,
-                            &sha_to_offset,
-                        ) catch {
+                            resolveRefDeltaFromRepo(
+                                allocator,
+                                pack_data,
+                                content_end,
+                                rec,
+                                git_dir.?,
+                                &cache,
+                                &sha_to_offset,
+                            ) catch {
+                                new_unresolved += 1;
+                                continue;
+                            };
+                        } else if (rec.obj_type == 6) {
+                            // OFS_DELTA whose base is also an unresolved delta — retry
+                            resolveOfsDelta(
+                                allocator,
+                                pack_data,
+                                content_end,
+                                rec,
+                                records[0..total_objects],
+                                &offset_to_idx,
+                                &cache,
+                                &decomp_buf,
+                                &sha_to_offset,
+                            ) catch {
+                                new_unresolved += 1;
+                                continue;
+                            };
+                        } else {
                             new_unresolved += 1;
-                            continue;
-                        };
-                    } else if (rec.obj_type == 6) {
-                        // OFS_DELTA whose base is also an unresolved delta — retry
-                        resolveOfsDelta(
-                            allocator,
-                            pack_data,
-                            content_end,
-                            rec,
-                            records[0..total_objects],
-                            &offset_to_idx,
-                            &cache,
-                            &decomp_buf,
-                            &sha_to_offset,
-                        ) catch {
-                            new_unresolved += 1;
-                            continue;
-                        };
-                    } else {
-                        new_unresolved += 1;
+                        }
                     }
+                    if (new_unresolved == unresolved_count) break;
+                    unresolved_count = new_unresolved;
                 }
-                if (new_unresolved == unresolved_count) break;
-                unresolved_count = new_unresolved;
             }
         }
     }
