@@ -78,7 +78,8 @@ jobs:
             ziggit.wasm.gz
 
   release:
-    needs: [build, wasm]
+    needs: [build]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
