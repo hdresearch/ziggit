@@ -1249,7 +1249,7 @@ fn scanForIgnored(
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_path, entry.name });
         defer allocator.free(entry_rel);
 
-        if (gitignore.isIgnored(entry_rel)) {
+        if (gitignore.isIgnoredPath(entry_rel, entry.kind == .directory)) {
             // This is an ignored file/dir - add it
             if (!tracked_files.contains(entry_rel)) {
                 try ignored_files.append(try allocator.dupe(u8, entry_rel));

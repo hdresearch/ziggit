@@ -732,8 +732,9 @@ pub fn scanDirectoryForUntrackedFiles(
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_path, entry.name });
         defer allocator.free(entry_relative_path);
         
-        // Check if ignored
-        if (gitignore.isIgnored(entry_relative_path)) continue;
+        // Check if ignored (pass is_dir so dir-only patterns like "foo/" work)
+        const is_dir = entry.kind == .directory;
+        if (gitignore.isIgnoredPath(entry_relative_path, is_dir)) continue;
         
         switch (entry.kind) {
             .file, .sym_link => {
@@ -930,7 +931,7 @@ pub fn findUntrackedDirEntries(
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ relative_path, entry.name });
         defer allocator.free(entry_relative_path);
 
-        if (gitignore.isIgnored(entry_relative_path)) continue;
+        if (gitignore.isIgnoredPath(entry_relative_path, entry.kind == .directory)) continue;
 
         if (pathspecs.len > 0) {
             var relevant = false;
