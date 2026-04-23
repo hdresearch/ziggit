@@ -22,6 +22,7 @@ const zlib_compat_mod = helpers.zlib_compat_mod;
 const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
+const color = @import("git/color.zig");
 
 pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
@@ -77,6 +78,7 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
     var decorate_refs_exclude = std.array_list.Managed([]const u8).init(allocator);
     defer decorate_refs_exclude.deinit();
     var clear_decorations = false;
+    var color_flag: ?[]const u8 = null;
 
     // helpers.Parse arguments
     while (args.next()) |arg| {
@@ -225,6 +227,12 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         } else if (std.mem.eql(u8, arg, "--do-walk")) {
             no_walk = false;
             no_walk_unsorted = false;
+        } else if (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--color=always")) {
+            color_flag = "always";
+        } else if (std.mem.eql(u8, arg, "--no-color") or std.mem.eql(u8, arg, "--color=never")) {
+            color_flag = "never";
+        } else if (std.mem.startsWith(u8, arg, "--color=")) {
+            color_flag = arg["--color=".len..];
         } else if (std.mem.eql(u8, arg, "--")) {
             // Everything after -- is a path, ignore for now
             break;
@@ -279,6 +287,8 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         std.process.exit(128);
     };
     defer allocator.free(git_path);
+
+    const use_color = color.shouldColorize(color_flag, git_path, "color.log", allocator);
 
     // Read grep.patternType from config (overridden by -F/-E/-P flags)
     if (!fixed_strings_explicit) {
@@ -1588,7 +1598,9 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             const date_display = if (author_line) |al| (helpers.parseAuthorDateRelative(al, allocator) catch "") else "";
             defer if (date_display.len > 0) allocator.free(date_display);
             output_buf.clearRetainingCapacity();
+            if (use_color) try output_buf.appendSlice(color.yellow);
             try output_buf.appendSlice(short_hash);
+            if (use_color) try output_buf.appendSlice(color.reset);
             try output_buf.append(' ');
             try output_buf.appendSlice(trunc_subject);
             try output_buf.appendSlice(ellipsis);
@@ -1656,7 +1668,9 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
             output_buf.clearRetainingCapacity();
             if (line_prefix.len > 0) try output_buf.appendSlice(line_prefix);
             if (show_graph) try output_buf.appendSlice("* ");
+            if (use_color) try output_buf.appendSlice(color.yellow);
             try output_buf.appendSlice(short_hash);
+            if (use_color) try output_buf.appendSlice(color.reset);
             try output_buf.append(' ');
             try output_buf.appendSlice(first_line);
             try output_buf.append('\n');
@@ -1664,7 +1678,10 @@ pub fn cmdLog(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIterat
         } else {
             if (line_prefix.len > 0) try platform_impl.writeStdout(line_prefix);
             if (show_graph) try platform_impl.writeStdout("* ");
-            const commit_header = try std.fmt.allocPrint(allocator, "commit {s}\n", .{cur_hash});
+            const commit_header = if (use_color)
+                try std.fmt.allocPrint(allocator, "{s}commit {s}{s}\n", .{ color.yellow, cur_hash, color.reset })
+            else
+                try std.fmt.allocPrint(allocator, "commit {s}\n", .{cur_hash});
             defer allocator.free(commit_header);
             try platform_impl.writeStdout(commit_header);
 

@@ -22,6 +22,7 @@ const zlib_compat_mod = helpers.zlib_compat_mod;
 const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
+const color_util = @import("git/color.zig");
 
 pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, platform_impl: *const platform_mod.Platform) !void {
     if (@import("builtin").target.os.tag == .freestanding) {
@@ -70,13 +71,24 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         std.process.exit(1);
     }
 
+    // Resolve color
+    var branch_color_flag: ?[]const u8 = null;
+    for (all_args.items) |a| {
+        if (std.mem.eql(u8, a, "--color") or std.mem.eql(u8, a, "--color=always")) branch_color_flag = "always"
+        else if (std.mem.eql(u8, a, "--no-color") or std.mem.eql(u8, a, "--color=never")) branch_color_flag = "never"
+        else if (std.mem.startsWith(u8, a, "--color=")) branch_color_flag = a["--color=".len..];
+    }
+    const use_color = color_util.shouldColorize(branch_color_flag, git_path, "color.branch", allocator);
+
     {
         var i: usize = 0;
         while (i < all_args.items.len) {
             if (std.mem.eql(u8, all_args.items[i], "-v") or std.mem.eql(u8, all_args.items[i], "--verbose") or
                 std.mem.eql(u8, all_args.items[i], "-f") or std.mem.eql(u8, all_args.items[i], "--force") or
                 std.mem.eql(u8, all_args.items[i], "--no-abbrev") or std.mem.eql(u8, all_args.items[i], "--abbrev") or
-                std.mem.startsWith(u8, all_args.items[i], "--abbrev="))
+                std.mem.startsWith(u8, all_args.items[i], "--abbrev=") or
+                std.mem.eql(u8, all_args.items[i], "--color") or std.mem.startsWith(u8, all_args.items[i], "--color=") or
+                std.mem.eql(u8, all_args.items[i], "--no-color"))
             {
                 _ = all_args.orderedRemove(i);
             } else {
@@ -132,14 +144,18 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
         // Succinct mode: compact branch list
         if (succinct_mod.isEnabled() and !verbose) {
             for (branches.items) |branch| {
-                const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
-                const msg = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix, branch });
+                const is_current = std.mem.eql(u8, branch, current_branch);
+                const prefix = if (is_current) "* " else "  ";
+                const c_pre = if (use_color and is_current) color_util.branch_current else "";
+                const c_suf = if (use_color and is_current) color_util.reset else "";
+                const msg = try std.fmt.allocPrint(allocator, "{s}{s}{s}{s}\n", .{ prefix, c_pre, branch, c_suf });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }
         } else {
         for (branches.items) |branch| {
-            const prefix = if (std.mem.eql(u8, branch, current_branch)) "* " else "  ";
+            const is_current = std.mem.eql(u8, branch, current_branch);
+            const prefix = if (is_current) "* " else "  ";
             if (verbose) {
                 const ref_name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch});
                 defer allocator.free(ref_name);
@@ -165,11 +181,15 @@ pub fn cmdBranch(allocator: std.mem.Allocator, args: *platform_mod.ArgIterator, 
                     } else |_| {}
                 }
                 defer if (free_subj) allocator.free(subj);
-                const msg = try std.fmt.allocPrint(allocator, "{s}{s} {s} {s}\n", .{ prefix, branch, short, subj });
+                const c_pre = if (use_color and is_current) color_util.branch_current else "";
+                const c_suf = if (use_color and is_current) color_util.reset else "";
+                const msg = try std.fmt.allocPrint(allocator, "{s}{s}{s}{s} {s} {s}\n", .{ prefix, c_pre, branch, c_suf, short, subj });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             } else {
-                const msg = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ prefix, branch });
+                const c_pre = if (use_color and is_current) color_util.branch_current else "";
+                const c_suf = if (use_color and is_current) color_util.reset else "";
+                const msg = try std.fmt.allocPrint(allocator, "{s}{s}{s}{s}\n", .{ prefix, c_pre, branch, c_suf });
                 defer allocator.free(msg);
                 try platform_impl.writeStdout(msg);
             }

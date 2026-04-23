@@ -8,6 +8,7 @@ const index_mod = @import("index.zig");
 const diff_mod = @import("diff.zig");
 const diff_stats = @import("diff_stats.zig");
 const userdiff = @import("userdiff.zig");
+const color_mod = @import("color.zig");
 const mc = @import("../main_common.zig");
 
 const DiffOutputMode = enum {
@@ -54,6 +55,7 @@ const DiffOpts = struct {
     suppress_blank_empty: bool = false,
     combined_use_c: bool = false, // true for -c (diff --combined), false for --cc (diff --cc)
     break_rewrites: bool = false,
+    use_color: bool = false,
 
     fn getAbbrevLen(self: *const DiffOpts) u32 {
         if (self.abbrev) |a| {
@@ -173,6 +175,12 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
                 }
             }
         }
+    }
+
+    // Auto-detect color for diff (before arg parsing sets explicit --color)
+    // This provides the default; explicit --color=always/never overrides later.
+    if (!opts.use_color) {
+        opts.use_color = color_mod.shouldColorize(null, git_path_for_config, "color.diff", allocator);
     }
 
     var i: usize = 0;
@@ -304,10 +312,12 @@ pub fn cmdDiff(allocator: std.mem.Allocator, args: *pm.ArgIterator, platform_imp
             opts.find_renames = true;
         } else if (std.mem.eql(u8, arg, "--submodule") or std.mem.startsWith(u8, arg, "--submodule=")) {
             // Accept submodule option
-        } else if (std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=")) {
-            // Accept color option
-        } else if (std.mem.eql(u8, arg, "--no-color")) {
-            // Accept
+        } else if (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--color=always")) {
+            opts.use_color = true;
+        } else if (std.mem.eql(u8, arg, "--no-color") or std.mem.eql(u8, arg, "--color=never")) {
+            opts.use_color = false;
+        } else if (std.mem.startsWith(u8, arg, "--color=")) {
+            // --color=auto falls through to auto-detect below
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--text")) {
             // Accept
         } else if (std.mem.eql(u8, arg, "--binary")) {
@@ -1302,7 +1312,7 @@ fn outputPatch(changes: []const FileChange, opts: *const DiffOpts, pi: *const pm
             // Generate and output hunks
             if (c.old_content.len > 0 or c.new_content.len > 0) {
                 const fm = resolveFuncnameMatcher(c.path, allocator);
-                try outputDiffHunksWithMatcher(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator, opts.suppress_blank_empty, fm);
+                try outputDiffHunksWithMatcher(c.old_content, c.new_content, opts.context_lines, lp, pi, allocator, opts.suppress_blank_empty, fm, opts.use_color);
             }
         }
     }
@@ -1514,9 +1524,13 @@ fn lineMatchesIgnorePatterns(content: []const u8, opts: *const DiffOpts) bool {
 
 fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u8, opts: *const DiffOpts, pi: *const pm.Platform, allocator: std.mem.Allocator) !void {
     const src_path = c.rename_from orelse c.path;
+    const uc = opts.use_color;
 
     // diff --git line
-    const git_line = try std.fmt.allocPrint(allocator, "{s}diff --git {s}{s} {s}{s}\n", .{ lp, sp, src_path, dp, c.path });
+    const git_line = if (uc)
+        try std.fmt.allocPrint(allocator, "{s}{s}diff --git {s}{s} {s}{s}{s}\n", .{ lp, color_mod.bold, sp, src_path, dp, c.path, color_mod.reset })
+    else
+        try std.fmt.allocPrint(allocator, "{s}diff --git {s}{s} {s}{s}\n", .{ lp, sp, src_path, dp, c.path });
     defer allocator.free(git_line);
     try pi.writeStdout(git_line);
 
@@ -1576,25 +1590,27 @@ fn outputDiffHeader(c: FileChange, sp: []const u8, dp: []const u8, lp: []const u
     }
 
     // --- and +++ lines
+    const b_pre = if (uc) color_mod.bold else "";
+    const b_suf = if (uc) color_mod.reset else "";
     if (c.is_new) {
-        const a_line = try std.fmt.allocPrint(allocator, "{s}--- /dev/null\n", .{lp});
+        const a_line = try std.fmt.allocPrint(allocator, "{s}{s}--- /dev/null{s}\n", .{ lp, b_pre, b_suf });
         defer allocator.free(a_line);
         try pi.writeStdout(a_line);
-        const b_line = try std.fmt.allocPrint(allocator, "{s}+++ {s}{s}\n", .{ lp, dp, c.path });
+        const b_line = try std.fmt.allocPrint(allocator, "{s}{s}+++ {s}{s}{s}\n", .{ lp, b_pre, dp, c.path, b_suf });
         defer allocator.free(b_line);
         try pi.writeStdout(b_line);
     } else if (c.is_deleted) {
-        const a_line = try std.fmt.allocPrint(allocator, "{s}--- {s}{s}\n", .{ lp, sp, c.path });
+        const a_line = try std.fmt.allocPrint(allocator, "{s}{s}--- {s}{s}{s}\n", .{ lp, b_pre, sp, c.path, b_suf });
         defer allocator.free(a_line);
         try pi.writeStdout(a_line);
-        const b_line = try std.fmt.allocPrint(allocator, "{s}+++ /dev/null\n", .{lp});
+        const b_line = try std.fmt.allocPrint(allocator, "{s}{s}+++ /dev/null{s}\n", .{ lp, b_pre, b_suf });
         defer allocator.free(b_line);
         try pi.writeStdout(b_line);
     } else {
-        const a_line = try std.fmt.allocPrint(allocator, "{s}--- {s}{s}\n", .{ lp, sp, src_path });
+        const a_line = try std.fmt.allocPrint(allocator, "{s}{s}--- {s}{s}{s}\n", .{ lp, b_pre, sp, src_path, b_suf });
         defer allocator.free(a_line);
         try pi.writeStdout(a_line);
-        const b_line = try std.fmt.allocPrint(allocator, "{s}+++ {s}{s}\n", .{ lp, dp, c.path });
+        const b_line = try std.fmt.allocPrint(allocator, "{s}{s}+++ {s}{s}{s}\n", .{ lp, b_pre, dp, c.path, b_suf });
         defer allocator.free(b_line);
         try pi.writeStdout(b_line);
     }
@@ -1684,11 +1700,11 @@ fn attrGlobMatch(pattern: []const u8, name: []const u8) bool {
     return true;
 }
 
-fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool) !void {
-    return outputDiffHunksWithMatcher(old_content, new_content, context_lines, lp, pi, allocator, suppress_blank_empty, null);
+fn outputDiffHunks(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool, uc: bool) !void {
+    return outputDiffHunksWithMatcher(old_content, new_content, context_lines, lp, pi, allocator, suppress_blank_empty, null, uc);
 }
 
-fn outputDiffHunksWithMatcher(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool, funcname_matcher: ?diff_mod.FuncnameMatcher) !void {
+fn outputDiffHunksWithMatcher(old_content: []const u8, new_content: []const u8, context_lines: u32, lp: []const u8, pi: *const pm.Platform, allocator: std.mem.Allocator, suppress_blank_empty: bool, funcname_matcher: ?diff_mod.FuncnameMatcher, uc: bool) !void {
     // Use the existing diff module to generate the unified diff
     const diff_output = diff_mod.generateUnifiedDiffWithHashesContextAndFuncname(
         old_content, new_content, "placeholder", "0", "0", context_lines, funcname_matcher, allocator,
@@ -1722,7 +1738,20 @@ fn outputDiffHunksWithMatcher(old_content: []const u8, new_content: []const u8, 
         if (suppress_blank_empty and line.len == 1 and line[0] == ' ') {
             try pi.writeStdout("\n");
         } else {
+            // Colorize hunk lines: @@ cyan, - red, + green
+            if (uc and line.len > 0) {
+                if (std.mem.startsWith(u8, line, "@@")) {
+                    try pi.writeStdout(color_mod.cyan);
+                } else if (line[0] == '-') {
+                    try pi.writeStdout(color_mod.red);
+                } else if (line[0] == '+') {
+                    try pi.writeStdout(color_mod.green);
+                }
+            }
             try pi.writeStdout(line);
+            if (uc and line.len > 0 and (std.mem.startsWith(u8, line, "@@") or line[0] == '-' or line[0] == '+')) {
+                try pi.writeStdout(color_mod.reset);
+            }
             try pi.writeStdout("\n");
         }
 
@@ -2310,7 +2339,7 @@ fn diffTwoFiles(allocator: std.mem.Allocator, path_a: []const u8, path_b: []cons
     defer allocator.free(header);
     try pi.writeStdout(header);
 
-    try outputDiffHunks(content_a, content_b, opts.context_lines, "", pi, allocator, opts.suppress_blank_empty);
+    try outputDiffHunks(content_a, content_b, opts.context_lines, "", pi, allocator, opts.suppress_blank_empty, opts.use_color);
 }
 
 fn diffNewFile(allocator: std.mem.Allocator, path: []const u8, opts: *const DiffOpts, pi: *const pm.Platform) !void {
@@ -3786,7 +3815,7 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
     // commit line
     var commit_line = std.array_list.Managed(u8).init(allocator);
     defer commit_line.deinit();
-    if (lo.use_color) try commit_line.appendSlice("\x1b[33m");
+    if (lo.use_color) try commit_line.appendSlice(color_mod.yellow);
     try commit_line.appendSlice("commit ");
     try commit_line.appendSlice(hash);
 
@@ -3802,7 +3831,7 @@ fn writeCommitHeader(hash: []const u8, data: []const u8, lo: *const LogOpts, is_
             }
         }
     }
-    if (lo.use_color) try commit_line.appendSlice("\x1b[m");
+    if (lo.use_color) try commit_line.appendSlice(color_mod.reset);
     try commit_line.append('\n');
     try pi.writeStdout(commit_line.items);
 
@@ -4875,21 +4904,11 @@ fn cmdLogInner(allocator: std.mem.Allocator, args: *pm.ArgIterator, pi: *const p
         lo.show_raw = false;
     }
 
-    // Auto-detect color: if color.ui=auto and GIT_PAGER_IN_USE is set, enable color
+    // Auto-detect color via shared utility (respects color.ui, color.diff, tty, NO_COLOR)
     if (!lo.use_color) {
         const gp_for_color = git_helpers_mod.findGitDirectory(allocator, pi) catch null;
         defer if (gp_for_color) |gpc| allocator.free(gpc);
-        if (gp_for_color) |gpc| {
-            const color_ui = git_helpers_mod.getConfigValueByKey(gpc, "color.ui", allocator);
-            if (color_ui) |val| {
-                defer allocator.free(val);
-                if (std.ascii.eqlIgnoreCase(val, "auto")) {
-                    if (std.posix.getenv("GIT_PAGER_IN_USE")) |_| lo.use_color = true;
-                } else if (std.ascii.eqlIgnoreCase(val, "always") or std.ascii.eqlIgnoreCase(val, "true")) {
-                    lo.use_color = true;
-                }
-            }
-        }
+        lo.use_color = color_mod.shouldColorize(null, gp_for_color, "color.diff", allocator);
     }
 
     // Read log.diffMerges config (check -c overrides first, then config file)

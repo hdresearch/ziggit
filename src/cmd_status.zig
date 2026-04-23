@@ -19,6 +19,7 @@ const diff_mod = helpers.diff_mod;
 const diff_stats_mod = helpers.diff_stats_mod;
 const network = helpers.network;
 const zlib_compat_mod = helpers.zlib_compat_mod;
+const color = @import("git/color.zig");
 const build_options = @import("build_options");
 const version_mod = @import("version.zig");
 const wildmatch_mod = @import("wildmatch.zig");
@@ -53,6 +54,7 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
     var show_untracked = true; // default: show untracked files
     var untracked_explicit = false;
     var untracked_all = false; // false = normal (collapse dirs), true = all (show individual files)
+    var color_flag: ?[]const u8 = null; // --color=always|never|auto
     var status_args = std.array_list.Managed([]const u8).init(allocator);
     defer status_args.deinit();
     while (args.next()) |arg| {
@@ -140,6 +142,12 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             ignore_submodules = .untracked;
         } else if (std.mem.eql(u8, arg, "--ignore-submodules=none")) {
             ignore_submodules = .none;
+        } else if (std.mem.eql(u8, arg, "--color")) {
+            color_flag = "always";
+        } else if (std.mem.startsWith(u8, arg, "--color=")) {
+            color_flag = arg["--color=".len..];
+        } else if (std.mem.eql(u8, arg, "--no-color")) {
+            color_flag = "never";
         } else if (arg.len > 0 and arg[0] != '-') {
             try status_args.append(arg);
         }
@@ -152,6 +160,12 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
         std.process.exit(128);
     };
     defer allocator.free(git_path);
+
+    // Resolve color: never for porcelain/short (machine-readable), otherwise auto-detect
+    const use_color = if (porcelain or short_format)
+        false
+    else
+        color.shouldColorize(color_flag, git_path, "color.status", allocator);
 
     // helpers.Get current working directory (repository root)
     const repo_root = std.fs.path.dirname(git_path) orelse {
@@ -604,13 +618,19 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 if (is_new) {
                     const rel_path = try makeRelativePath(allocator, entry.path, prefix);
                     defer allocator.free(rel_path);
-                    const msg = try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{rel_path});
+                    const msg = if (use_color)
+                        try std.fmt.allocPrint(allocator, "\t{s}new file:   {s}{s}\n", .{ color.status_added, rel_path, color.reset })
+                    else
+                        try std.fmt.allocPrint(allocator, "\tnew file:   {s}\n", .{rel_path});
                     defer allocator.free(msg);
                     try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
                 } else {
                     const rel_path = try makeRelativePath(allocator, entry.path, prefix);
                     defer allocator.free(rel_path);
-                    const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
+                    const msg = if (use_color)
+                        try std.fmt.allocPrint(allocator, "\t{s}modified:   {s}{s}\n", .{ color.status_added, rel_path, color.reset })
+                    else
+                        try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
                     defer allocator.free(msg);
                     try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
                 }
@@ -634,7 +654,10 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             for (modified_files.items) |entry| {
                 const rel_path = try makeRelativePath(allocator, entry.path, prefix);
                 defer allocator.free(rel_path);
-                const msg = try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
+                const msg = if (use_color)
+                    try std.fmt.allocPrint(allocator, "\t{s}modified:   {s}{s}\n", .{ color.status_changed, rel_path, color.reset })
+                else
+                    try std.fmt.allocPrint(allocator, "\tmodified:   {s}\n", .{rel_path});
                 defer allocator.free(msg);
                 try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
             }
@@ -659,7 +682,10 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             for (deleted_files.items) |entry| {
                 const rel_path = try makeRelativePath(allocator, entry.path, prefix);
                 defer allocator.free(rel_path);
-                const msg = try std.fmt.allocPrint(allocator, "\tdeleted:    {s}\n", .{rel_path});
+                const msg = if (use_color)
+                    try std.fmt.allocPrint(allocator, "\t{s}deleted:    {s}{s}\n", .{ color.status_changed, rel_path, color.reset })
+                else
+                    try std.fmt.allocPrint(allocator, "\tdeleted:    {s}\n", .{rel_path});
                 defer allocator.free(msg);
                 try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
             }
@@ -787,7 +813,10 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             for (untracked_files.items) |file| {
                 const rel_path = try makeRelativePath(allocator, file, prefix);
                 defer allocator.free(rel_path);
-                const msg = try std.fmt.allocPrint(allocator, "\t{s}\n", .{rel_path});
+                const msg = if (use_color)
+                    try std.fmt.allocPrint(allocator, "\t{s}{s}{s}\n", .{ color.status_untracked, rel_path, color.reset })
+                else
+                    try std.fmt.allocPrint(allocator, "\t{s}\n", .{rel_path});
                 defer allocator.free(msg);
                 try writeWithCommentPrefix(platform_impl, msg, comment_prefix);
             }
@@ -908,18 +937,20 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
             }
 
             if (s_conflict > 0) {
-                const cmsg = try std.fmt.allocPrint(allocator, "! Conflicts: {d} files\n", .{s_conflict});
+                const cmsg = try std.fmt.allocPrint(allocator, "{s}! Conflicts: {d} files{s}\n", .{ if (use_color) color.red else "", s_conflict, if (use_color) color.reset else "" });
                 defer allocator.free(cmsg);
                 try platform_impl.writeStdout(cmsg);
             }
             if (s_staged.items.len > 0) {
-                const smsg = try std.fmt.allocPrint(allocator, "+ Staged: {d} files\n", .{s_staged.items.len});
+                const smsg = try std.fmt.allocPrint(allocator, "{s}+ Staged: {d} files{s}\n", .{ if (use_color) color.green else "", s_staged.items.len, if (use_color) color.reset else "" });
                 defer allocator.free(smsg);
                 try platform_impl.writeStdout(smsg);
                 const max_show: usize = 15;
                 for (s_staged.items[0..@min(s_staged.items.len, max_show)]) |p| {
+                    if (use_color) try platform_impl.writeStdout(color.green);
                     try platform_impl.writeStdout("  ");
                     try platform_impl.writeStdout(p);
+                    if (use_color) try platform_impl.writeStdout(color.reset);
                     try platform_impl.writeStdout("\n");
                 }
                 if (s_staged.items.len > max_show) {
@@ -929,13 +960,15 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 }
             }
             if (s_modified.items.len > 0) {
-                const mmsg = try std.fmt.allocPrint(allocator, "~ Modified: {d} files\n", .{s_modified.items.len});
+                const mmsg = try std.fmt.allocPrint(allocator, "{s}~ Modified: {d} files{s}\n", .{ if (use_color) color.red else "", s_modified.items.len, if (use_color) color.reset else "" });
                 defer allocator.free(mmsg);
                 try platform_impl.writeStdout(mmsg);
                 const max_show: usize = 15;
                 for (s_modified.items[0..@min(s_modified.items.len, max_show)]) |p| {
+                    if (use_color) try platform_impl.writeStdout(color.red);
                     try platform_impl.writeStdout("  ");
                     try platform_impl.writeStdout(p);
+                    if (use_color) try platform_impl.writeStdout(color.reset);
                     try platform_impl.writeStdout("\n");
                 }
                 if (s_modified.items.len > max_show) {
@@ -945,13 +978,15 @@ pub fn cmdStatus(passed_allocator: std.mem.Allocator, args: *platform_mod.ArgIte
                 }
             }
             if (s_untracked.items.len > 0) {
-                const umsg = try std.fmt.allocPrint(allocator, "? Untracked: {d} files\n", .{s_untracked.items.len});
+                const umsg = try std.fmt.allocPrint(allocator, "{s}? Untracked: {d} files{s}\n", .{ if (use_color) color.red else "", s_untracked.items.len, if (use_color) color.reset else "" });
                 defer allocator.free(umsg);
                 try platform_impl.writeStdout(umsg);
                 const max_show: usize = 10;
                 for (s_untracked.items[0..@min(s_untracked.items.len, max_show)]) |p| {
+                    if (use_color) try platform_impl.writeStdout(color.red);
                     try platform_impl.writeStdout("  ");
                     try platform_impl.writeStdout(p);
+                    if (use_color) try platform_impl.writeStdout(color.reset);
                     try platform_impl.writeStdout("\n");
                 }
                 if (s_untracked.items.len > max_show) {
