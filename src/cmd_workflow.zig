@@ -219,27 +219,36 @@ pub fn cmdRestart(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIter
     const origin_branch = std.fmt.allocPrint(allocator, "origin/{s}", .{branch}) catch return error.OutOfMemory;
     defer allocator.free(origin_branch);
 
-    runSubcommand(allocator, &.{ "fetch", "origin" }) catch |e| {
-        printErr(allocator, "FAILED: fetch origin\n", .{});
-        return e;
+    const fetch_ok = blk: {
+        runSubcommand(allocator, &.{ "fetch", "origin" }) catch {
+            // Fetch can fail if the remote is empty (no refs yet). That's OK —
+            // this is the first push to a new repo. Skip merge and succeed.
+            printErr(allocator, "note: fetch origin failed (remote may be empty), skipping merge\n", .{});
+            break :blk false;
+        };
+        break :blk true;
     };
 
-    // Ensure tracking ref exists (ziggit clone/fetch may not create it)
-    ensureTrackingRef(branch);
+    if (fetch_ok) {
+        // Ensure tracking ref exists (ziggit clone/fetch may not create it)
+        ensureTrackingRef(branch);
 
-    // Merge instead of rebase. This preserves all local commit SHAs so that
-    // `reset --hard HEAD~1` always goes to the previous local commit, not
-    // some unrelated point in history. For parallel agents this is critical:
-    // rebase rewrites their commits and creates orphaned refs.
-    runSubcommand(allocator, &.{ "merge", origin_branch, "--no-edit" }) catch |e| {
-        // If merge conflicts, abort to leave the tree clean and let the
-        // caller (agent) know it needs to retry or resolve.
-        printErr(allocator, "FAILED: merge {s} (conflict?) — aborting merge\n", .{origin_branch});
-        runSubcommand(allocator, &.{ "merge", "--abort" }) catch {};
-        return e;
-    };
+        // Merge instead of rebase. This preserves all local commit SHAs so that
+        // `reset --hard HEAD~1` always goes to the previous local commit, not
+        // some unrelated point in history. For parallel agents this is critical:
+        // rebase rewrites their commits and creates orphaned refs.
+        runSubcommand(allocator, &.{ "merge", origin_branch, "--no-edit" }) catch |e| {
+            // If merge conflicts, abort to leave the tree clean and let the
+            // caller (agent) know it needs to retry or resolve.
+            printErr(allocator, "FAILED: merge {s} (conflict?) — aborting merge\n", .{origin_branch});
+            runSubcommand(allocator, &.{ "merge", "--abort" }) catch {};
+            return e;
+        };
 
-    printErr(allocator, "ok merged {s}\n", .{origin_branch});
+        printErr(allocator, "ok merged {s}\n", .{origin_branch});
+    } else {
+        printErr(allocator, "ok (no remote refs yet)\n", .{});
+    }
 }
 
 /// start [BRANCH] — stash work, sync with origin (merge), restore work
@@ -335,25 +344,32 @@ pub fn cmdProgress(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIte
 
     // Step 2: Fetch + merge to incorporate other agents' work.
     // Now safe because local changes are committed.
-    runSubcommand(allocator, &.{ "fetch", "origin" }) catch |e| {
-        printErr(allocator, "FAILED: fetch origin\n", .{});
-        return e;
+    // Fetch may fail if this is the first push to an empty remote — that's OK,
+    // just skip the merge and go straight to push.
+    const fetch_ok = blk: {
+        runSubcommand(allocator, &.{ "fetch", "origin" }) catch {
+            printErr(allocator, "note: fetch origin failed (remote may be empty), skipping merge\n", .{});
+            break :blk false;
+        };
+        break :blk true;
     };
 
-    // Merge origin — this is a no-op if already up to date.
-    runSubcommand(allocator, &.{ "merge", origin_branch, "--no-edit" }) catch |e| {
-        // Merge conflict — abort to leave the tree clean.
-        // The local commit is safe; push what we have.
-        printErr(allocator, "WARN: merge {s} conflict — aborting merge, pushing local commit\n", .{origin_branch});
-        runSubcommand(allocator, &.{ "merge", "--abort" }) catch {};
-        // Still try to push the local commit even without the merge
-        if (!pushBranch(allocator, current_branch, default_branch)) {
-            printErr(allocator, "FAILED: push after merge conflict\n", .{});
-            return e;
-        }
-        printErr(allocator, "ok committed+pushed (no merge) ({s})\n", .{default_branch});
-        return;
-    };
+    if (fetch_ok) {
+        // Merge origin — this is a no-op if already up to date.
+        runSubcommand(allocator, &.{ "merge", origin_branch, "--no-edit" }) catch |e| {
+            // Merge conflict — abort to leave the tree clean.
+            // The local commit is safe; push what we have.
+            printErr(allocator, "WARN: merge {s} conflict — aborting merge, pushing local commit\n", .{origin_branch});
+            runSubcommand(allocator, &.{ "merge", "--abort" }) catch {};
+            // Still try to push the local commit even without the merge
+            if (!pushBranch(allocator, current_branch, default_branch)) {
+                printErr(allocator, "FAILED: push after merge conflict\n", .{});
+                return e;
+            }
+            printErr(allocator, "ok committed+pushed (no merge) ({s})\n", .{default_branch});
+            return;
+        };
+    }
 
     // Step 3: Push
     const push_ok = pushBranch(allocator, current_branch, default_branch);
@@ -422,12 +438,61 @@ pub fn cmdSetup(allocator: std.mem.Allocator, args_iter: *platform_mod.ArgIterat
         return error.SubcommandFailed;
     };
 
-    // Step 1: Clone
+    // Step 1: Clone (falls back to init+remote for empty repos)
     printErr(allocator, "setup: cloning {s} → {s}\n", .{ url, path });
-    runSubcommand(allocator, &.{ "clone", url, path }) catch |e| {
-        printErr(allocator, "FAILED: clone {s}\n", .{url});
-        return e;
+    const clone_ok = blk: {
+        runSubcommand(allocator, &.{ "clone", url, path }) catch {
+            break :blk false;
+        };
+        break :blk true;
     };
+
+    if (!clone_ok) {
+        // Clone failed — the repo may exist but be empty (zero commits).
+        // Fall back to: mkdir + init + remote add origin <url>
+        printErr(allocator, "setup: clone failed, trying init for empty repo\n", .{});
+
+        std.fs.cwd().makePath(path) catch {
+            printErr(allocator, "FAILED: mkdir {s}\n", .{path});
+            return error.SubcommandFailed;
+        };
+
+        // Save and restore CWD so init runs inside the target dir
+        var old_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const old_cwd = std.fs.cwd().realpath(".", &old_cwd_buf) catch {
+            printErr(allocator, "FAILED: getcwd\n", .{});
+            return error.SubcommandFailed;
+        };
+
+        std.posix.chdir(path) catch {
+            printErr(allocator, "FAILED: chdir {s}\n", .{path});
+            return error.SubcommandFailed;
+        };
+        defer std.posix.chdir(old_cwd) catch {};
+
+        runSubcommand(allocator, &.{"init"}) catch {
+            printErr(allocator, "FAILED: init in {s}\n", .{path});
+            return error.SubcommandFailed;
+        };
+
+        // Inject token into remote URL for push access
+        const push_cmd = @import("git/push_cmd.zig");
+        const remote_url = push_cmd.httpsWithToken(allocator, url) orelse
+            (allocator.dupe(u8, url) catch return error.OutOfMemory);
+        defer allocator.free(remote_url);
+
+        runSubcommand(allocator, &.{ "remote", "add", "origin", remote_url }) catch {
+            printErr(allocator, "FAILED: remote add origin\n", .{});
+            return error.SubcommandFailed;
+        };
+
+        // Switch to main branch (GitHub default)
+        runSubcommand(allocator, &.{ "checkout", "-b", "main" }) catch {
+            // Might already be on main
+        };
+
+        printErr(allocator, "setup: initialized empty repo with remote origin\n", .{});
+    }
 
     // Step 2: cd into the repo and configure identity.
     // We can't actually chdir, but we can run config with -C.
