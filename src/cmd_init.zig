@@ -208,6 +208,10 @@ pub fn initRepositoryInDir(git_dir: []const u8, bare: bool, template_dir: ?[]con
             if (env_val.len > 0) break :blk env_val;
             allocator.free(env_val);
         }
+        // Check -c init.defaultBranch=<name> command-line override
+        if (helpers.getConfigOverride("init.defaultbranch")) |ov| {
+            if (ov.len > 0) break :blk try allocator.dupe(u8, ov);
+        }
         // helpers.Check init.defaultBranch from global config
         const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch null;
         defer if (home_dir) |h| allocator.free(h);
